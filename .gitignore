@@ -16,3 +16,6 @@ venv/
 *.sqlite3
 data/
 logs/
+*.egg-info/
+configs/character.json
+*.sqlite3-*

@@ -61,9 +61,27 @@ class ConversationRepository:
                 );
                 CREATE INDEX IF NOT EXISTS turns_scope_sequence
                     ON turns(user_id, character_id, sequence);
+                CREATE TABLE IF NOT EXISTS user_preferences (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT NOT NULL,
+                    character_id TEXT NOT NULL REFERENCES characters(character_id),
+                    kind TEXT NOT NULL CHECK(kind IN ('nickname','reply_style','avoid_topic','correction')),
+                    preference_key TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)),
+                    source TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(user_id, character_id, kind, preference_key)
+                );
+                CREATE INDEX IF NOT EXISTS preferences_active_scope
+                    ON user_preferences(user_id, character_id, active);
             """)
             self.connection.execute(
                 "INSERT OR IGNORE INTO schema_migrations VALUES (1, ?)", (utc_now(),)
+            )
+            self.connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations VALUES (2, ?)", (utc_now(),)
             )
 
     def bind_character(self, character_id, config_path):
@@ -131,18 +149,86 @@ class ConversationRepository:
             "ORDER BY sequence DESC LIMIT 1", (user_id, character_id)
         ).fetchone()
 
+    def set_preference(self, user_id, character_id, kind, key, value, source):
+        now = utc_now()
+        with self.connection:
+            self._upsert_preference(user_id, character_id, kind, key, value, source, now)
+            return self.connection.execute(
+                "SELECT * FROM user_preferences WHERE user_id=? AND character_id=? "
+                "AND kind=? AND preference_key=?",
+                (user_id, character_id, kind, key),
+            ).fetchone()
+
+    def _upsert_preference(self, user_id, character_id, kind, key, value, source, now):
+        self.connection.execute(
+            "INSERT INTO user_preferences "
+            "(user_id,character_id,kind,preference_key,value,active,source,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,1,?,?,?) "
+            "ON CONFLICT(user_id,character_id,kind,preference_key) DO UPDATE SET "
+            "value=excluded.value, active=1, source=excluded.source, updated_at=excluded.updated_at",
+            (user_id, character_id, kind, key, value, source, now, now),
+        )
+
+    def list_preferences(self, user_id, character_id):
+        return self.connection.execute(
+            "SELECT * FROM user_preferences WHERE user_id=? AND character_id=? "
+            "AND active=1 ORDER BY id", (user_id, character_id)
+        ).fetchall()
+
+    def remove_preference(self, user_id, character_id, preference_id):
+        with self.connection:
+            changed = self.connection.execute(
+                "UPDATE user_preferences SET active=0, updated_at=? "
+                "WHERE id=? AND user_id=? AND character_id=? AND active=1",
+                (utc_now(), preference_id, user_id, character_id),
+            ).rowcount
+            if changed != 1:
+                raise MiraError("preference_not_found")
+
+    def remove_preference_at(self, user_id, character_id, position):
+        with self.connection:
+            row = self.connection.execute(
+                "SELECT id,kind,value FROM user_preferences "
+                "WHERE user_id=? AND character_id=? AND active=1 "
+                "ORDER BY id LIMIT 1 OFFSET ?",
+                (user_id, character_id, position - 1),
+            ).fetchone()
+            if row is None:
+                raise MiraError("preference_not_found")
+            self.connection.execute(
+                "UPDATE user_preferences SET active=0, updated_at=? WHERE id=?",
+                (utc_now(), row["id"]),
+            )
+            return row
+
     def history_before(self, turn, limit):
         if limit == 0:
             return []
         rows = self.connection.execute(
-            "SELECT u.text AS user_text, a.text AS assistant_text FROM turns t "
+            "SELECT u.text AS user_text, u.occurred_at AS user_occurred_at, "
+            "a.text AS assistant_text FROM turns t "
             "JOIN messages u ON u.turn_id=t.id AND u.role='user' "
             "JOIN messages a ON a.turn_id=t.id AND a.role='assistant' "
             "WHERE t.user_id=? AND t.character_id=? AND t.sequence<? "
             "AND t.status='completed' ORDER BY t.sequence DESC LIMIT ?",
             (turn["user_id"], turn["character_id"], turn["sequence"], limit),
         ).fetchall()
-        return [(row["user_text"], row["assistant_text"]) for row in reversed(rows)]
+        return [(row["user_text"], row["assistant_text"], row["user_occurred_at"])
+                for row in reversed(rows)]
+
+    def user_messages_before(self, turn, limit):
+        scope = (turn["user_id"], turn["character_id"], turn["sequence"])
+        total = self.connection.execute(
+            "SELECT COUNT(*) FROM turns WHERE user_id=? AND character_id=? AND sequence<?",
+            scope,
+        ).fetchone()[0]
+        rows = self.connection.execute(
+            "SELECT m.text, m.occurred_at FROM turns t "
+            "JOIN messages m ON m.turn_id=t.id AND m.role='user' "
+            "WHERE t.user_id=? AND t.character_id=? AND t.sequence<? "
+            "ORDER BY t.sequence DESC LIMIT ?", (*scope, limit),
+        ).fetchall()
+        return total, list(reversed(rows))
 
     def begin_attempt(self, turn_id, provider, model):
         with self.connection:
@@ -155,6 +241,16 @@ class ConversationRepository:
                 (str(uuid4()), turn_id, attempt, provider, model, utc_now()),
             )
             return attempt
+
+    def complete_attempt(self, turn_id, attempt, input_tokens=None, output_tokens=None):
+        with self.connection:
+            changed = self.connection.execute(
+                "UPDATE model_calls SET status='completed', input_tokens=?, output_tokens=? "
+                "WHERE turn_id=? AND attempt=? AND status='pending'",
+                (input_tokens, output_tokens, turn_id, attempt),
+            ).rowcount
+            if changed != 1:
+                raise MiraError("invalid_call_state")
 
     def finish(self, turn_id, status, provider, model, attempt, text=None,
                error_code=None, input_tokens=None, output_tokens=None):

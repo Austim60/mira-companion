@@ -1,3 +1,5 @@
+import copy
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -16,12 +18,18 @@ class FakeProvider:
         self.calls = []
         self.error = None
         self.reply = None
+        self.responses = []
+        self.tools = []
 
-    def generate(self, messages):
-        self.calls.append(messages)
+    def generate(self, messages, tools=None):
+        self.calls.append(copy.deepcopy(messages))
+        self.tools.append(tools)
         if self.error:
             raise MiraError(self.error)
-        return self.reply if self.reply is not None else "回复 " + messages[-1]["content"], 12, 4
+        if self.responses:
+            return self.responses.pop(0)
+        reply = self.reply if self.reply is not None else "回复 " + messages[-1]["content"]
+        return {"role": "assistant", "content": reply}, 12, 4
 
 
 class ConversationTests(unittest.TestCase):
@@ -147,6 +155,158 @@ class ConversationTests(unittest.TestCase):
         with self.assertRaisesRegex(MiraError, "invalid_character"):
             self.service.handle_message(self.message("2", "继续"))
         self.assertEqual(self.service.latest_turn("user", "mira")["id"], failed.turn_id)
+
+    def test_preferences_and_corrections_survive_restart(self):
+        nickname = self.service.set_preference("user", "mira", "nickname", "小墨")
+        self.service.set_preference("user", "mira", "reply_style", "简短一些")
+        self.service.set_preference("user", "mira", "avoid_topic", "考研")
+        correction = self.service.set_preference(
+            "user", "mira", "correction", "面试改为下午四点", "面试在下午三点"
+        )
+        self.assertEqual(len(self.service.list_preferences("user", "mira")), 4)
+        self.assertEqual(self.service.list_preferences("other-user", "mira"), [])
+        self.service.handle_message(self.message("1", "我几点面试？"))
+        system = self.provider.calls[-1][0]["content"]
+        self.assertIn("用户希望被称为：小墨", system)
+        self.assertIn("用户希望的回复方式：简短一些", system)
+        self.assertIn("用户不愿讨论的话题：考研", system)
+        self.assertIn("当前以「面试改为下午四点」为准", system)
+        self.repository.close()
+        self.repository = ConversationRepository(self.settings.database_path)
+        self.service = ConversationService(self.settings, self.repository, self.provider)
+        self.assertEqual(len(self.service.list_preferences("user", "mira")), 4)
+        self.service.remove_preference("user", "mira", correction["id"])
+        self.service.remove_preference("user", "mira", nickname["id"])
+        self.service.handle_message(self.message("2", "继续"))
+        self.assertNotIn("用户已更正旧说法", self.provider.calls[-1][0]["content"])
+        self.assertNotIn("用户希望被称为：小墨", self.provider.calls[-1][0]["content"])
+        with self.assertRaisesRegex(MiraError, "preference_not_found"):
+            self.service.remove_preference("user", "mira", correction["id"])
+
+    def test_existing_database_gains_preference_table_without_losing_turns(self):
+        first = self.service.handle_message(self.message("1", "原有对话"))
+        with self.repository.connection:
+            self.repository.connection.execute("DROP TABLE user_preferences")
+            self.repository.connection.execute("DELETE FROM schema_migrations WHERE version=2")
+        self.repository.close()
+        self.repository = ConversationRepository(self.settings.database_path)
+        self.service = ConversationService(self.settings, self.repository, self.provider)
+        self.assertEqual(self.repository.get_turn(first.turn_id)["status"], "completed")
+        self.assertEqual(self.service.list_preferences("user", "mira"), [])
+        self.assertEqual(self.repository.connection.execute(
+            "SELECT COUNT(*) FROM schema_migrations WHERE version=2"
+        ).fetchone()[0], 1)
+
+    def test_model_calls_preference_tool_then_writes_final_reply(self):
+        call = {"id": "call-name", "type": "function", "function": {
+            "name": "set_preference", "arguments": '{"kind":"nickname","value":"小墨"}'}}
+        self.provider.responses = [
+            ({"role": "assistant", "content": None, "tool_calls": [call]}, 12, 3),
+            ({"role": "assistant", "content": "好的，以后叫你小墨。"}, 20, 5),
+        ]
+        first = self.message("1", "以后叫我小墨。")
+        result = self.service.handle_message(first)
+        self.assertEqual(result.text, "好的，以后叫你小墨。")
+        self.assertEqual(self.service.list_preferences("user", "mira")[0]["value"], "小墨")
+        self.assertEqual(self.provider.calls[-1][-1]["role"], "tool")
+        self.assertIn('"saved": true', self.provider.calls[-1][-1]["content"])
+        self.assertEqual(self.service.handle_message(first), result)
+        self.assertEqual(len(self.provider.calls), 2)
+
+    def test_cross_day_history_has_message_times(self):
+        first = replace(self.message("1", "今天下午三点面试"),
+                        occurred_at="2026-11-18T15:00:00+08:00")
+        second = replace(self.message("2", "下午还有事"),
+                         occurred_at="2026-11-19T09:00:00+08:00")
+        self.service.handle_message(first)
+        self.service.handle_message(second)
+        messages = self.provider.calls[-1]
+        self.assertIn("当前消息时间：", messages[0]["content"])
+        self.assertIn("2026-11-19", messages[0]["content"])
+        self.assertIn("2026-11-18", messages[1]["content"])
+        self.assertIn("今天下午三点面试", messages[1]["content"])
+        self.assertIn("不要把不同日期的安排直接当作同一件事", messages[0]["content"])
+
+    def test_history_tool_requires_model_call_and_model_final_reply(self):
+        self.service.handle_message(self.message("1", "你好"))
+        self.service.handle_message(self.message("2", "今天下午三点面试"))
+        call = {"id": "call-history", "type": "function", "function": {
+            "name": "get_recent_user_messages", "arguments": "{}"}}
+        self.provider.responses = [
+            ({"role": "assistant", "content": None, "tool_calls": [call]}, 13, 2),
+            ({"role": "assistant", "content": "你之前说了你好和下午三点面试。"}, 24, 8),
+        ]
+        question = self.message("3", "能回顾一下之前聊天吗？")
+        result = self.service.handle_message(question)
+        self.assertEqual(result.text, "你之前说了你好和下午三点面试。")
+        tool_result = self.provider.calls[-1][-1]
+        self.assertEqual(tool_result["role"], "tool")
+        self.assertIn("今天下午三点面试", tool_result["content"])
+        self.assertIn('"covers_all_saved_messages_in_current_database": true',
+                      tool_result["content"])
+        self.assertNotIn("能回顾一下之前聊天吗", tool_result["content"])
+        self.assertNotIn("/exit", tool_result["content"])
+        self.assertEqual(len(self.provider.calls), 4)
+        self.assertEqual(self.repository.connection.execute(
+            "SELECT COUNT(*) FROM model_calls WHERE turn_id=?", (result.turn_id,)
+        ).fetchone()[0], 2)
+        self.assertEqual(self.service.handle_message(question).text, result.text)
+
+    def test_invalid_model_tool_arguments_do_not_change_preferences(self):
+        call = {"id": "call-invalid", "type": "function", "function": {
+            "name": "set_preference", "arguments": '{"kind":"nickname","value":123}'}}
+        self.provider.responses = [
+            ({"role": "assistant", "content": None, "tool_calls": [call]}, 10, 2),
+            ({"role": "assistant", "content": "我没能保存这条称呼。"}, 15, 5),
+        ]
+        result = self.service.handle_message(self.message("1", "以后叫我小墨"))
+        self.assertEqual(result.text, "我没能保存这条称呼。")
+        self.assertEqual(self.service.list_preferences("user", "mira"), [])
+        self.assertIn("invalid_tool_arguments", self.provider.calls[-1][-1]["content"])
+
+    def test_tool_round_limit_fails_without_local_reply(self):
+        self.provider.responses = [
+            ({"role": "assistant", "content": None, "tool_calls": [{
+                "id": f"call-{index}", "type": "function", "function": {
+                    "name": "get_recent_user_messages", "arguments": "{}"
+                },
+            }]}, 10, 2)
+            for index in range(4)
+        ]
+        result = self.service.handle_message(self.message("1", "聊聊之前的事"))
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.error_code, "tool_round_limit")
+        self.assertIsNone(self.repository.assistant_message(result.turn_id))
+        self.assertEqual(len(self.provider.calls), 4)
+
+    def test_visible_preference_position_survives_database_id_gap(self):
+        self.service.set_preference("user", "mira", "nickname", "小墨")
+        style = self.service.set_preference("user", "mira", "reply_style", "简短")
+        self.service.remove_preference("user", "mira", style["id"])
+        correction = self.service.set_preference(
+            "user", "mira", "correction", "测试代号是蓝色", "测试代号是红色"
+        )
+        self.assertEqual(correction["id"], 3)
+        list_call = {"id": "call-list", "type": "function", "function": {
+            "name": "list_preferences", "arguments": "{}"}}
+        self.provider.responses = [
+            ({"role": "assistant", "content": None, "tool_calls": [list_call]}, 10, 2),
+            ({"role": "assistant", "content": "1. 小墨；2. 蓝色更正。"}, 15, 5),
+        ]
+        self.service.handle_message(self.message("1", "/preferences"))
+        listed = json.loads(self.provider.calls[-1][-1]["content"])["preferences"]
+        self.assertEqual([item["position"] for item in listed], [1, 2])
+        self.assertEqual([item["kind"] for item in listed], ["nickname", "correction"])
+        remove_call = {"id": "call-remove", "type": "function", "function": {
+            "name": "remove_preference", "arguments": '{"position":2}'}}
+        self.provider.responses = [
+            ({"role": "assistant", "content": None, "tool_calls": [remove_call]}, 10, 2),
+            ({"role": "assistant", "content": "已撤销第二条更正。"}, 15, 5),
+        ]
+        result = self.service.handle_message(self.message("2", "/remove 2"))
+        self.assertEqual(result.text, "已撤销第二条更正。")
+        self.assertEqual([row["kind"] for row in self.service.list_preferences("user", "mira")],
+                         ["nickname"])
 
 
 if __name__ == "__main__":

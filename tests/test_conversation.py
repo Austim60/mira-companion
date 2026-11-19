@@ -4,7 +4,7 @@ import sqlite3
 import tempfile
 import unittest
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from mira.config import Settings
@@ -212,6 +212,41 @@ class ConversationTests(unittest.TestCase):
         self.assertIn('"saved": true', self.provider.calls[-1][-1]["content"])
         self.assertEqual(self.service.handle_message(first), result)
         self.assertEqual(len(self.provider.calls), 2)
+
+    def test_follow_up_keeps_source_and_can_be_closed(self):
+        self.service.prepare()
+        self.repository.set_proactive_enabled("user", "mira", True)
+        due = datetime.now(timezone.utc) + timedelta(days=1)
+        expires = due + timedelta(days=1)
+        create_call = {"id": "follow-up", "type": "function", "function": {
+            "name": "create_follow_up", "arguments": json.dumps({
+                "topic": "面试结束后问问结果", "due_at": due.isoformat(),
+                "expires_at": expires.isoformat(),
+            }, ensure_ascii=False),
+        }}
+        self.provider.responses = [
+            ({"role": "assistant", "content": None, "tool_calls": [create_call]}, 12, 3),
+            ({"role": "assistant", "content": "好，到时候再聊。"}, 20, 5),
+        ]
+        first = self.service.handle_message(self.message("1", "明天下午面试，之后可以问问我"))
+        rows = self.repository.list_follow_ups("user", "mira")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["source_turn_id"], first.turn_id)
+        self.assertEqual(rows[0]["topic"], "面试结束后问问结果")
+        close_call = {"id": "close", "type": "function", "function": {
+            "name": "close_follow_up", "arguments": json.dumps({
+                "id": rows[0]["id"], "status": "resolved",
+            }),
+        }}
+        self.provider.responses = [
+            ({"role": "assistant", "content": None, "tool_calls": [close_call]}, 12, 3),
+            ({"role": "assistant", "content": "知道了，不再跟进面试。"}, 20, 5),
+        ]
+        self.service.handle_message(self.message("2", "面试结束了，我已经收到结果"))
+        self.assertEqual(self.repository.list_follow_ups("user", "mira"), [])
+        self.assertEqual(self.repository.connection.execute(
+            "SELECT status FROM follow_ups WHERE id=?", (rows[0]["id"],)
+        ).fetchone()[0], "resolved")
 
     def test_contact_pause_survives_restart_and_expires(self):
         pause_call = {"id": "pause", "type": "function", "function": {

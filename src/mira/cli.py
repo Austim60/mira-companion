@@ -111,7 +111,7 @@ def main(argv=None):
             if line in {"/proactive on", "/proactive off"}:
                 enabled = line.endswith("on")
                 repository.set_proactive_enabled(user_id, character_id, enabled)
-                print("日常主动联系已" + ("开启" if enabled else "关闭") + "。")
+                print("主动联系已" + ("开启" if enabled else "关闭") + "。")
                 wake.set()
                 continue
             try:

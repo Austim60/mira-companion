@@ -1,7 +1,8 @@
 import json
+import sqlite3
 import tempfile
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from mira.config import Settings
@@ -121,6 +122,97 @@ class ProactiveTests(unittest.TestCase):
             (self.now + timedelta(hours=1)).isoformat(),
         ))
         self.assertIn("今天过得怎么样？", self.conversation.provider.messages[0]["content"])
+
+    def test_due_follow_up_is_used_and_marked_asked(self):
+        self.repository.set_proactive_enabled("user", "mira", True)
+        turn = self.repository.latest_turn("user", "mira")
+        follow_up = self.repository.add_follow_up(
+            turn, "问问面试结果", (self.now - timedelta(hours=1)).astimezone(timezone.utc).isoformat(),
+            (self.now + timedelta(days=1)).astimezone(timezone.utc).isoformat(),
+        )
+        self.assertEqual(self.proactive.check("user", "mira", self.now), "sent")
+        self.assertIn("问问面试结果", self.provider.messages[0]["content"])
+        self.assertIn("最近聊了件有趣的事", self.provider.messages[0]["content"])
+        self.assertEqual(self.repository.connection.execute(
+            "SELECT status FROM follow_ups WHERE id=?", (follow_up["id"],)
+        ).fetchone()[0], "asked")
+
+    def test_cancel_during_generation_blocks_follow_up(self):
+        self.repository.set_proactive_enabled("user", "mira", True)
+        turn = self.repository.latest_turn("user", "mira")
+        follow_up = self.repository.add_follow_up(
+            turn, "问问面试结果", (self.now - timedelta(hours=1)).astimezone(timezone.utc).isoformat(),
+            (self.now + timedelta(days=1)).astimezone(timezone.utc).isoformat(),
+        )
+        self.provider.before_reply = lambda: self.repository.close_follow_up(
+            "user", "mira", follow_up["id"], "cancelled"
+        )
+        self.assertEqual(self.proactive.check("user", "mira", self.now), "boundary_changed")
+        self.assertEqual(self.sent, [])
+
+    def test_unknown_delivery_does_not_repeat_follow_up(self):
+        self.repository.set_proactive_enabled("user", "mira", True)
+        turn = self.repository.latest_turn("user", "mira")
+        follow_up = self.repository.add_follow_up(
+            turn, "问问面试结果", (self.now - timedelta(hours=1)).astimezone(timezone.utc).isoformat(),
+            (self.now + timedelta(days=1)).astimezone(timezone.utc).isoformat(),
+        )
+
+        def fail_delivery(_text):
+            raise OSError("unknown delivery")
+
+        self.proactive.deliver = fail_delivery
+        self.assertEqual(self.proactive.check("user", "mira", self.now), "delivery_unknown")
+        self.assertEqual(self.repository.connection.execute(
+            "SELECT status FROM follow_ups WHERE id=?", (follow_up["id"],)
+        ).fetchone()[0], "uncertain")
+        self.assertEqual(self.proactive.check("user", "mira", self.now), "daily_limit")
+
+    def test_pending_source_cannot_trigger_and_failed_source_is_removed(self):
+        turn, _ = self.repository.create_or_get(MessageInput(
+            "user", "mira", "test", "unfinished", "明天有面试",
+            (self.now - timedelta(days=1)).isoformat(),
+        ))
+        follow_up = self.repository.add_follow_up(
+            turn, "问问面试结果", (self.now - timedelta(hours=1)).astimezone(timezone.utc).isoformat(),
+            (self.now + timedelta(days=1)).astimezone(timezone.utc).isoformat(),
+        )
+        self.assertIsNone(self.repository.due_follow_up("user", "mira", self.now))
+        self.repository.mark_failed(turn["id"], "test_failure")
+        self.assertIsNone(self.repository.connection.execute(
+            "SELECT 1 FROM follow_ups WHERE id=?", (follow_up["id"],)
+        ).fetchone())
+
+    def test_one_turn_can_hold_distinct_follow_ups_without_duplicates(self):
+        turn = self.repository.latest_turn("user", "mira")
+        due = (self.now + timedelta(days=1)).astimezone(timezone.utc).isoformat()
+        expires = (self.now + timedelta(days=2)).astimezone(timezone.utc).isoformat()
+        first = self.repository.add_follow_up(turn, "问面试结果", due, expires)
+        duplicate = self.repository.add_follow_up(turn, "问面试结果", due, expires)
+        second = self.repository.add_follow_up(turn, "问体检结果", due, expires)
+        self.assertEqual(first["id"], duplicate["id"])
+        self.assertNotEqual(first["id"], second["id"])
+
+    def test_existing_database_adds_follow_up_column(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "old.sqlite3")
+            connection = sqlite3.connect(path)
+            connection.execute(
+                "CREATE TABLE proactive_decisions ("
+                "id TEXT PRIMARY KEY, user_id TEXT NOT NULL, character_id TEXT NOT NULL, "
+                "opportunity TEXT NOT NULL, status TEXT NOT NULL, text TEXT, reason TEXT, "
+                "created_at TEXT NOT NULL, updated_at TEXT NOT NULL, "
+                "UNIQUE(user_id, character_id, opportunity))"
+            )
+            connection.close()
+            repository = ConversationRepository(path)
+            try:
+                columns = {row[1] for row in repository.connection.execute(
+                    "PRAGMA table_info(proactive_decisions)"
+                )}
+                self.assertIn("follow_up_id", columns)
+            finally:
+                repository.close()
 
 
 if __name__ == "__main__":

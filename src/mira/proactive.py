@@ -41,8 +41,11 @@ class ProactiveService:
             raise MiraError("character_id_mismatch")
         if not self.repository.recent_completed_messages(user_id, character_id, 1):
             return "no_conversation", None, None
+        follow_up = self.repository.due_follow_up(
+            user_id, character_id, self.clock().astimezone()
+        )
         assistant, _, _ = self.provider.generate(
-            self._messages(character, user_id, character_id, self.clock().astimezone()),
+            self._messages(character, user_id, character_id, self.clock().astimezone(), follow_up),
             DECISION_TOOLS,
         )
         choice, content, reason = self._parse_decision(assistant)
@@ -62,15 +65,19 @@ class ProactiveService:
         window = self._window(now)
         if window is None:
             return "quiet_hours"
-        opportunity = now.strftime("%Y-%m-%d") + ":" + window
         allowed = self._allowed(user_id, character_id, now)
         if allowed != "allowed":
             return allowed
-        if not self.repository.reserve_opportunity(user_id, character_id, opportunity):
+        follow_up = self.repository.due_follow_up(user_id, character_id, now)
+        opportunity = (("followup:" + follow_up["id"] + ":" if follow_up else "daily:") +
+                       now.strftime("%Y-%m-%d") + ":" + window)
+        if not self.repository.reserve_opportunity(
+            user_id, character_id, opportunity, follow_up["id"] if follow_up else None
+        ):
             return "already_checked"
         try:
             assistant, _, _ = self.provider.generate(
-                self._messages(character, user_id, character_id, now), DECISION_TOOLS
+                self._messages(character, user_id, character_id, now, follow_up), DECISION_TOOLS
             )
             choice, content, reason = self._parse_decision(assistant)
         except MiraError as exc:
@@ -152,18 +159,24 @@ class ProactiveService:
             return "awaiting_reply"
         return "allowed"
 
-    def _messages(self, character, user_id, character_id, now):
+    def _messages(self, character, user_id, character_id, now, follow_up=None):
         system = (
             "你是虚拟角色，正在决定是否主动联系用户。当前时间：" + now.isoformat() +
             "。角色名称：" + character["display_name"] +
             "；性格：" + character["personality"] +
             "；表达习惯：" + character["speaking_style"] +
             "；互动边界：" + character["boundaries"] +
-            "。用户已允许少量日常问候，但本次可以完全不联系。只根据给出的真实对话判断，"
+            "。用户已允许主动联系，但本次可以完全不联系。只根据给出的真实对话判断，"
             "不要编造经历、约定或你在现实中做过的事；不要用内疚或催促让用户回复。"
             "如没有自然且具体的理由，调用 skip_proactive；否则调用 propose_proactive。"
             "只调用一个工具，不直接输出文字。"
         )
+        if follow_up:
+            system += ("\n当前优先判断有来源的待跟进事项：" + follow_up["topic"] +
+                       "。用户原话：" + follow_up["source_text"][:500] +
+                       "。最早联系时间：" + follow_up["due_at"] +
+                       "；过期时间：" + follow_up["expires_at"] +
+                       "。如果近期对话表明事项已取消或结果已说过，调用 skip_proactive。")
         preferences = self.repository.list_preferences(user_id, character_id)
         if preferences:
             system += "\n用户当前明确规则：" + "；".join(

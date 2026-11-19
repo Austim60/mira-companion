@@ -204,6 +204,48 @@ class ConversationService:
                     turn["user_id"], turn["character_id"], "model:" + turn["id"]
                 )
                 return {"paused": False}
+            if name == "create_follow_up":
+                if set(arguments) != {"topic", "due_at", "expires_at"} or any(
+                    not isinstance(arguments[key], str) for key in arguments
+                ):
+                    raise MiraError("invalid_tool_arguments")
+                topic = arguments["topic"].strip()
+                due = datetime.fromisoformat(arguments["due_at"])
+                expires = datetime.fromisoformat(arguments["expires_at"])
+                if (not topic or len(topic) > 160 or due.tzinfo is None or
+                    expires.tzinfo is None or due <= datetime.now(timezone.utc) or
+                    expires <= due or expires - due > timedelta(days=7)):
+                    raise MiraError("invalid_tool_arguments")
+                if not self.repository.proactive_enabled(turn["user_id"], turn["character_id"]):
+                    raise MiraError("proactive_disabled")
+                row = self.repository.add_follow_up(
+                    turn, topic, due.astimezone(timezone.utc).isoformat(),
+                    expires.astimezone(timezone.utc).isoformat(),
+                )
+                return {"saved": row["status"] == "pending", "id": row["id"],
+                        "topic": row["topic"], "due_at": row["due_at"],
+                        "expires_at": row["expires_at"]}
+            if name == "list_follow_ups":
+                if arguments:
+                    raise MiraError("invalid_tool_arguments")
+                return {"follow_ups": [
+                    {"id": row["id"], "topic": row["topic"],
+                     "due_at": row["due_at"], "expires_at": row["expires_at"]}
+                    for row in self.repository.list_follow_ups(
+                        turn["user_id"], turn["character_id"]
+                    )
+                ]}
+            if name == "close_follow_up":
+                if (set(arguments) != {"id", "status"} or
+                    not isinstance(arguments["id"], str) or
+                    arguments["status"] not in {"resolved", "cancelled"}):
+                    raise MiraError("invalid_tool_arguments")
+                self.repository.close_follow_up(
+                    turn["user_id"], turn["character_id"],
+                    arguments["id"], arguments["status"],
+                )
+                return {"closed": True, "id": arguments["id"],
+                        "status": arguments["status"]}
             raise MiraError("unknown_tool")
         except (ValueError, TypeError):
             return {"error": "invalid_tool_arguments"}
@@ -222,9 +264,12 @@ class ConversationService:
             last_contact = self.repository.recent_proactive(
                 turn["user_id"], turn["character_id"]
             )
+            follow_ups = self.repository.list_follow_ups(
+                turn["user_id"], turn["character_id"]
+            )
             messages = build_context(character, history, user_message["text"],
                                      user_message["occurred_at"], self.settings.char_budget,
-                                     preferences, contact_pause, last_contact)
+                                     preferences, contact_pause, last_contact, follow_ups)
         except MiraError as exc:
             self.repository.mark_failed(turn_id, exc.code)
             return self._result(self.repository.get_turn(turn_id))

@@ -155,3 +155,36 @@ class LiveModelTests(unittest.TestCase):
                 self.assertEqual(len(sent), int(result == "sent"))
             finally:
                 repository.close()
+
+    def test_follow_up_created_and_cancelled_from_conversation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            settings = replace(load_settings(), database_path=str(root / "mira.sqlite3"),
+                               character_path=str(Path("configs/character.example.json").resolve()),
+                               max_output_tokens=256)
+            repository = ConversationRepository(settings.database_path)
+            service = ConversationService(settings, repository, OpenAICompatibleProvider(settings))
+            try:
+                service.prepare()
+                repository.set_proactive_enabled("test-user", "mira", True)
+                now = datetime.now(timezone.utc).isoformat()
+                first = service.handle_message(MessageInput(
+                    "test-user", "mira", "live-test", "plan",
+                    "我明天下午三点有面试，面试结束后你可以问问我结果。", now,
+                ))
+                self.assertEqual(first.status, "completed", first.error_code)
+                self.assertNotIn("我会来问", first.text)
+                items = repository.list_follow_ups("test-user", "mira")
+                self.assertEqual(len(items), 1, first.text)
+                self.assertEqual(items[0]["source_turn_id"], first.turn_id)
+                cancelled = service.handle_message(MessageInput(
+                    "test-user", "mira", "live-test", "cancel",
+                    "刚才说的面试取消了，不用再跟进。", now,
+                ))
+                self.assertEqual(cancelled.status, "completed", cancelled.error_code)
+                self.assertNotIn("不会再提", cancelled.text)
+                self.assertNotIn("觉得轻松", cancelled.text)
+                self.assertEqual(repository.list_follow_ups("test-user", "mira"), [],
+                                 cancelled.text)
+            finally:
+                repository.close()

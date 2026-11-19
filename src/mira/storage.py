@@ -96,11 +96,32 @@ class ConversationRepository:
                     id TEXT PRIMARY KEY, user_id TEXT NOT NULL,
                     character_id TEXT NOT NULL REFERENCES characters(character_id),
                     opportunity TEXT NOT NULL, status TEXT NOT NULL,
+                    follow_up_id TEXT,
                     text TEXT, reason TEXT, created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     UNIQUE(user_id, character_id, opportunity)
                 );
+                CREATE TABLE IF NOT EXISTS follow_ups (
+                    id TEXT PRIMARY KEY, user_id TEXT NOT NULL,
+                    character_id TEXT NOT NULL REFERENCES characters(character_id),
+                    source_turn_id TEXT NOT NULL REFERENCES turns(id),
+                    topic TEXT NOT NULL, due_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN
+                        ('pending','asked','resolved','cancelled','uncertain')),
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    UNIQUE(source_turn_id, topic)
+                );
+                CREATE INDEX IF NOT EXISTS follow_ups_due
+                    ON follow_ups(user_id, character_id, status, due_at);
             """)
+            columns = {row[1] for row in self.connection.execute(
+                "PRAGMA table_info(proactive_decisions)"
+            )}
+            if "follow_up_id" not in columns:
+                self.connection.execute(
+                    "ALTER TABLE proactive_decisions ADD COLUMN follow_up_id TEXT"
+                )
             self.connection.execute(
                 "INSERT OR IGNORE INTO schema_migrations VALUES (1, ?)", (utc_now(),)
             )
@@ -112,6 +133,12 @@ class ConversationRepository:
             )
             self.connection.execute(
                 "INSERT OR IGNORE INTO schema_migrations VALUES (4, ?)", (utc_now(),)
+            )
+            self.connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations VALUES (5, ?)", (utc_now(),)
+            )
+            self.connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations VALUES (6, ?)", (utc_now(),)
             )
 
     def bind_character(self, character_id, config_path):
@@ -127,12 +154,21 @@ class ConversationRepository:
     def recover_pending(self):
         with self.connection:
             self.connection.execute(
+                "DELETE FROM follow_ups WHERE status='pending' AND source_turn_id IN "
+                "(SELECT id FROM turns WHERE status='pending')"
+            )
+            self.connection.execute(
                 "UPDATE model_calls SET status='failed', error_code='interrupted' "
                 "WHERE status='pending'"
             )
             self.connection.execute(
                 "UPDATE turns SET status='failed', error_code='interrupted', updated_at=? "
                 "WHERE status='pending'", (utc_now(),)
+            )
+            self.connection.execute(
+                "UPDATE follow_ups SET status='uncertain', updated_at=? WHERE id IN "
+                "(SELECT follow_up_id FROM proactive_decisions WHERE status='sending') "
+                "AND status='pending'", (utc_now(),)
             )
             self.connection.execute(
                 "UPDATE proactive_decisions SET status='skipped', reason='interrupted', "
@@ -283,24 +319,36 @@ class ConversationRepository:
         ).fetchone()
         return row is not None and bool(row[0])
 
-    def reserve_opportunity(self, user_id, character_id, opportunity):
+    def reserve_opportunity(self, user_id, character_id, opportunity, follow_up_id=None):
         now = utc_now()
         with self.connection:
             cursor = self.connection.execute(
                 "INSERT OR IGNORE INTO proactive_decisions "
-                "(id,user_id,character_id,opportunity,status,created_at,updated_at) "
-                "VALUES (?,?,?,?,'pending',?,?)",
-                (str(uuid4()), user_id, character_id, opportunity, now, now),
+                "(id,user_id,character_id,opportunity,status,follow_up_id,created_at,updated_at) "
+                "VALUES (?,?,?,?,'pending',?,?,?)",
+                (str(uuid4()), user_id, character_id, opportunity, follow_up_id, now, now),
             )
             return cursor.rowcount == 1
 
     def finish_opportunity(self, user_id, character_id, opportunity, status, text=None, reason=None):
         with self.connection:
+            row = self.connection.execute(
+                "SELECT follow_up_id FROM proactive_decisions "
+                "WHERE user_id=? AND character_id=? AND opportunity=?",
+                (user_id, character_id, opportunity),
+            ).fetchone()
             self.connection.execute(
                 "UPDATE proactive_decisions SET status=?, text=?, reason=?, updated_at=? "
                 "WHERE user_id=? AND character_id=? AND opportunity=?",
                 (status, text, reason, utc_now(), user_id, character_id, opportunity),
             )
+            if row and row["follow_up_id"] and status in {"sent", "unknown"}:
+                self.connection.execute(
+                    "UPDATE follow_ups SET status=?, updated_at=? "
+                    "WHERE id=? AND status='pending'",
+                    ("asked" if status == "sent" else "uncertain", utc_now(),
+                     row["follow_up_id"]),
+                )
 
     def claim_delivery(self, user_id, character_id, opportunity, now, day_start, text, reason):
         with self.connection:
@@ -311,9 +359,16 @@ class ConversationRepository:
             ).rowcount
             if changed != 1:
                 return False
+            row = self.connection.execute(
+                "SELECT follow_up_id FROM proactive_decisions "
+                "WHERE user_id=? AND character_id=? AND opportunity=?",
+                (user_id, character_id, opportunity),
+            ).fetchone()
             allowed = (self.proactive_enabled(user_id, character_id) and
                        self.get_contact_pause(user_id, character_id, now) is None and
-                       self.proactive_sent_since(user_id, character_id, day_start) == 1)
+                       self.proactive_sent_since(user_id, character_id, day_start) == 1 and
+                       (row["follow_up_id"] is None or
+                        self.follow_up_pending(row["follow_up_id"], now)))
             if not allowed:
                 self.connection.execute(
                     "UPDATE proactive_decisions SET status='skipped', reason='boundary_changed' "
@@ -345,6 +400,56 @@ class ConversationRepository:
             "ORDER BY t.sequence DESC LIMIT ?",
             (user_id, character_id, limit),
         ).fetchall()
+
+    def add_follow_up(self, turn, topic, due_at, expires_at):
+        now = utc_now()
+        with self.connection:
+            self.connection.execute(
+                "INSERT INTO follow_ups VALUES (?,?,?,?,?,?,?,'pending',?,?) "
+                "ON CONFLICT(source_turn_id, topic) DO NOTHING",
+                (str(uuid4()), turn["user_id"], turn["character_id"], turn["id"],
+                 topic, due_at, expires_at, now, now),
+            )
+            return self.connection.execute(
+                "SELECT * FROM follow_ups WHERE source_turn_id=? AND topic=?",
+                (turn["id"], topic),
+            ).fetchone()
+
+    def list_follow_ups(self, user_id, character_id):
+        return self.connection.execute(
+            "SELECT * FROM follow_ups WHERE user_id=? AND character_id=? "
+            "AND status='pending' AND expires_at>? ORDER BY due_at",
+            (user_id, character_id, utc_now()),
+        ).fetchall()
+
+    def close_follow_up(self, user_id, character_id, follow_up_id, status):
+        with self.connection:
+            changed = self.connection.execute(
+                "UPDATE follow_ups SET status=?, updated_at=? "
+                "WHERE id=? AND user_id=? AND character_id=? AND status='pending'",
+                (status, utc_now(), follow_up_id, user_id, character_id),
+            ).rowcount
+            if changed != 1:
+                raise MiraError("follow_up_not_found")
+
+    def due_follow_up(self, user_id, character_id, now):
+        timestamp = now.astimezone(timezone.utc).isoformat()
+        return self.connection.execute(
+            "SELECT f.*, m.text AS source_text FROM follow_ups f "
+            "JOIN turns t ON t.id=f.source_turn_id AND t.status='completed' "
+            "JOIN messages m ON m.turn_id=f.source_turn_id AND m.role='user' "
+            "WHERE f.user_id=? AND f.character_id=? AND f.status='pending' "
+            "AND f.due_at<=? AND f.expires_at>? ORDER BY f.due_at LIMIT 1",
+            (user_id, character_id, timestamp, timestamp),
+        ).fetchone()
+
+    def follow_up_pending(self, follow_up_id, now):
+        timestamp = now.astimezone(timezone.utc).isoformat()
+        return self.connection.execute(
+            "SELECT 1 FROM follow_ups WHERE id=? AND status='pending' "
+            "AND due_at<=? AND expires_at>?",
+            (follow_up_id, timestamp, timestamp),
+        ).fetchone() is not None
 
     def history_before(self, turn, limit):
         if limit == 0:
@@ -419,6 +524,11 @@ class ConversationRepository:
             ).rowcount
             if changed != 1:
                 raise MiraError("invalid_call_state")
+            if status == "failed":
+                self.connection.execute(
+                    "DELETE FROM follow_ups WHERE source_turn_id=? AND status='pending'",
+                    (turn_id,),
+                )
 
     def mark_failed(self, turn_id, error_code):
         with self.connection:
@@ -428,6 +538,10 @@ class ConversationRepository:
             ).rowcount
             if changed != 1:
                 raise MiraError("invalid_turn_state")
+            self.connection.execute(
+                "DELETE FROM follow_ups WHERE source_turn_id=? AND status='pending'",
+                (turn_id,),
+            )
 
     def start_retry(self, turn_id, user_id, character_id):
         with self.connection:

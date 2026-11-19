@@ -48,7 +48,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("Mira：你好呀", output.getvalue())
             self.assertIn("最近轮次：completed", output.getvalue())
             self.assertIn("主动联系授权：是", output.getvalue())
-            self.assertIn("日常主动联系已关闭", output.getvalue())
+            self.assertIn("主动联系已关闭", output.getvalue())
             self.assertIn("主动联系预览（未发送）：预览消息", output.getvalue())
             self.assertIn("主动联系检查：最近六小时聊过天", output.getvalue())
             self.assertIn("/name\n用法：/name 小墨", output.getvalue())

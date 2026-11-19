@@ -8,7 +8,7 @@ def local_time(occurred_at):
 
 
 def build_context(character, history, current, current_at, budget, preferences=(),
-                  contact_pause=None, last_contact=None):
+                  contact_pause=None, last_contact=None, follow_ups=()):
     system = ("你是虚拟角色，以下是角色设定。尊重用户的现实生活与自主选择。\n" +
               "角色名称：" + character['display_name'] + "\n性格：" + character['personality'] +
               "\n表达习惯：" + character['speaking_style'] + "\n背景（角色设定）：" + character['background'] +
@@ -30,6 +30,13 @@ def build_context(character, history, current, current_at, budget, preferences=(
               "明确的不要主动联系请求调用 pause_contact；明确恢复请求调用 resume_contact。"
               "暂停不影响用户主动发来的聊天。只有工具确认成功后才能说暂停或恢复已生效。"
               "模糊的少联系请求先询问范围；角色性格不能推翻明确暂停。")
+    system += ("用户明确提到有时间线的未来事项且已允许主动联系时，可调用 create_follow_up 保存候选；"
+               "时间不清楚就先问，不能把玩笑或你自己的猜测存成事项。"
+               "用户取消计划或说出结果时，调用 list_follow_ups 核对，再用 close_follow_up 关闭对应事项。"
+               "只有工具确认成功后才能说事项已保存或关闭。"
+               "保存候选不保证届时会联系，仍受时段、暂停、频率和当时判断限制；不要承诺一定会来问。"
+               "用户说不用跟进时，只确认不再主动询问该事项，不要扩大为永远不再提及；"
+               "这一轮也不要继续追问该事项或用户对此的感受。")
     if contact_pause:
         until = contact_pause['paused_until']
         system += ('\n当前主动联系已暂停；' +
@@ -38,6 +45,11 @@ def build_context(character, history, current, current_at, budget, preferences=(
     if last_contact:
         system += ('\n你上次主动发出的消息（' + local_time(last_contact['created_at']) +
                    '）：' + last_contact['text'] + '。用户可以选择不回复。')
+    if follow_ups:
+        system += '\n仍待跟进的事项：'
+        for item in follow_ups[:5]:
+            system += ('\n' + item['id'] + '：' + item['topic'] +
+                       '；最早联系：' + local_time(item['due_at']))
     if preferences:
         system += '\n以下是用户当前明确规则，优先于角色习惯及历史对话：'
     for preference in preferences:

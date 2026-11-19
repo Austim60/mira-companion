@@ -68,4 +68,36 @@ CHAT_TOOLS = [
             "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_follow_up",
+            "description": "用户明确说了未来事项且当前角色获准主动联系时，保存一条有用户原话来源的待跟进候选。用户已说结果、只是玩笑或时间含糊到无法确定合适联系窗口时不要保存，先询问。due_at 是最早适宜联系时间，expires_at 是过时后不再主动问的时间；都必须带时区。",
+            "parameters": {"type": "object", "properties": {
+                "topic": {"type": "string", "description": "简短且忠于用户原话的事项"},
+                "due_at": {"type": "string", "description": "最早适宜联系时间，ISO 8601 带时区"},
+                "expires_at": {"type": "string", "description": "事项过期时间，ISO 8601 带时区"},
+            }, "required": ["topic", "due_at", "expires_at"],
+                "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_follow_ups",
+            "description": "查看当前用户与角色尚未处理的待跟进事项及 ID；用户要查看、取消或已说出结果时先调用。",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "close_follow_up",
+            "description": "用户明确取消某事项或已经说出结果时，按 list_follow_ups 返回的 ID 关闭，避免主动联系再提。",
+            "parameters": {"type": "object", "properties": {
+                "id": {"type": "string"},
+                "status": {"type": "string", "enum": ["cancelled", "resolved"]},
+            }, "required": ["id", "status"], "additionalProperties": False},
+        },
+    },
 ]

@@ -4,13 +4,14 @@ import os
 import tempfile
 import unittest
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from mira.config import load_settings
 from mira.conversation import ConversationService
 from mira.models import MessageInput
 from mira.provider import OpenAICompatibleProvider
+from mira.proactive import ProactiveService
 from mira.storage import ConversationRepository
 
 
@@ -98,5 +99,59 @@ class LiveModelTests(unittest.TestCase):
                     [row["kind"] for row in service.list_preferences("test-user", "mira")],
                     ["nickname"], removed.text,
                 )
+            finally:
+                repository.close()
+
+    def test_explicit_contact_pause_is_saved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            settings = replace(load_settings(), database_path=str(root / "mira.sqlite3"),
+                               character_path=str(Path("configs/character.example.json").resolve()),
+                               max_output_tokens=256)
+            repository = ConversationRepository(settings.database_path)
+            service = ConversationService(settings, repository, OpenAICompatibleProvider(settings))
+            try:
+                service.prepare()
+                result = service.handle_message(MessageInput(
+                    "test-user", "mira", "live-test", "pause", "这周别主动找我。",
+                    datetime.now(timezone.utc).isoformat()
+                ))
+                self.assertEqual(result.status, "completed", result.error_code)
+                self.assertTrue(service.is_contact_paused("test-user", "mira"), result.text)
+                pause = repository.get_contact_pause("test-user", "mira", datetime.now(timezone.utc))
+                self.assertIsNotNone(pause["paused_until"], result.text)
+                self.assertEqual(datetime.fromisoformat(pause["paused_until"]).astimezone().weekday(), 0)
+            finally:
+                repository.close()
+
+    def test_proactive_model_chooses_send_or_skip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            settings = replace(load_settings(), database_path=str(root / "mira.sqlite3"),
+                               character_path=str(Path("configs/character.example.json").resolve()),
+                               max_output_tokens=256)
+            repository = ConversationRepository(settings.database_path)
+            try:
+                service = ConversationService(settings, repository, OpenAICompatibleProvider(settings))
+                service.prepare()
+                now = datetime.now().astimezone().replace(
+                    hour=11, minute=0, second=0, microsecond=0
+                )
+                turn, _ = repository.create_or_get(MessageInput(
+                    "test-user", "mira", "live-test", "seed", "昨天说起了一部喜欢的电影。",
+                    (now - timedelta(days=1)).isoformat(),
+                ))
+                attempt = repository.begin_attempt(turn["id"], "seed", "seed")
+                repository.finish(turn["id"], "completed", "seed", "seed", attempt,
+                                  text="那部电影让你印象最深的是什么？")
+                repository.set_proactive_enabled("test-user", "mira", True)
+                sent = []
+                proactive = ProactiveService(
+                    settings, repository, OpenAICompatibleProvider(settings), sent.append,
+                    clock=lambda: now,
+                )
+                result = proactive.check("test-user", "mira", now)
+                self.assertIn(result, {"sent", "skipped"}, result)
+                self.assertEqual(len(sent), int(result == "sent"))
             finally:
                 repository.close()

@@ -2,7 +2,7 @@
 
 import json
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from .config import load_character
 from .context import build_context, local_time
@@ -109,6 +109,16 @@ class ConversationService:
         except sqlite3.Error as exc:
             raise MiraError("storage_error") from exc
 
+    def is_contact_paused(self, user_id, character_id, now=None):
+        """Return whether an explicit user pause blocks proactive contact now."""
+        self._check_character_id(character_id)
+        try:
+            return self.repository.get_contact_pause(
+                user_id, character_id, now or datetime.now(timezone.utc)
+            ) is not None
+        except sqlite3.Error as exc:
+            raise MiraError("storage_error") from exc
+
     def _check_character_id(self, character_id):
         character = self.prepare()
         if character_id != character["character_id"]:
@@ -168,6 +178,32 @@ class ConversationService:
                 )
                 return {"removed": True, "position": arguments["position"],
                         "kind": removed["kind"], "value": removed["value"]}
+            if name == "pause_contact":
+                if set(arguments) != {"period"} or arguments["period"] not in {
+                    "today", "this_week", "indefinite"
+                }:
+                    raise MiraError("invalid_tool_arguments")
+                period = arguments["period"]
+                paused_until = None
+                if period != "indefinite":
+                    now = datetime.now().astimezone()
+                    days = 1 if period == "today" else 7 - now.weekday()
+                    end = (now + timedelta(days=days)).replace(
+                        hour=0, minute=0, second=0, microsecond=0
+                    )
+                    paused_until = end.astimezone(timezone.utc).isoformat()
+                self.repository.set_contact_pause(
+                    turn["user_id"], turn["character_id"], paused_until,
+                    "model:" + turn["id"],
+                )
+                return {"paused": True, "period": period, "until": paused_until}
+            if name == "resume_contact":
+                if arguments:
+                    raise MiraError("invalid_tool_arguments")
+                self.repository.resume_contact(
+                    turn["user_id"], turn["character_id"], "model:" + turn["id"]
+                )
+                return {"paused": False}
             raise MiraError("unknown_tool")
         except (ValueError, TypeError):
             return {"error": "invalid_tool_arguments"}
@@ -180,9 +216,15 @@ class ConversationService:
             history = self.repository.history_before(turn, self.settings.history_turns)
             user_message = self.repository.user_message(turn_id)
             preferences = self.repository.list_preferences(turn["user_id"], turn["character_id"])
+            contact_pause = self.repository.get_contact_pause(
+                turn["user_id"], turn["character_id"], datetime.now(timezone.utc)
+            )
+            last_contact = self.repository.recent_proactive(
+                turn["user_id"], turn["character_id"]
+            )
             messages = build_context(character, history, user_message["text"],
                                      user_message["occurred_at"], self.settings.char_budget,
-                                     preferences)
+                                     preferences, contact_pause, last_contact)
         except MiraError as exc:
             self.repository.mark_failed(turn_id, exc.code)
             return self._result(self.repository.get_turn(turn_id))

@@ -7,7 +7,8 @@ def local_time(occurred_at):
     return datetime.fromisoformat(occurred_at).astimezone().strftime('%Y-%m-%d %H:%M %z')
 
 
-def build_context(character, history, current, current_at, budget, preferences=()):
+def build_context(character, history, current, current_at, budget, preferences=(),
+                  contact_pause=None, last_contact=None):
     system = ("你是虚拟角色，以下是角色设定。尊重用户的现实生活与自主选择。\n" +
               "角色名称：" + character['display_name'] + "\n性格：" + character['personality'] +
               "\n表达习惯：" + character['speaking_style'] + "\n背景（角色设定）：" + character['background'] +
@@ -25,7 +26,18 @@ def build_context(character, history, current, current_at, budget, preferences=(
               "随后回复结果。仅在编号不存在或请求含糊时询问用户。"
               "历史工具只覆盖当前用户、角色和本地数据库；若结果标明覆盖全部已保存消息，不要说本库还有未展示的更早消息。"
               "工具只提供数据或执行结果，最后仍由你回复。只有工具确认成功后才能说偏好已保存或撤销；"
-              "没有调用工具或工具失败时如实说明，不要承诺后续对话会遵守尚未保存的规则。")
+              "没有调用工具或工具失败时如实说明，不要承诺后续对话会遵守尚未保存的规则。"
+              "明确的不要主动联系请求调用 pause_contact；明确恢复请求调用 resume_contact。"
+              "暂停不影响用户主动发来的聊天。只有工具确认成功后才能说暂停或恢复已生效。"
+              "模糊的少联系请求先询问范围；角色性格不能推翻明确暂停。")
+    if contact_pause:
+        until = contact_pause['paused_until']
+        system += ('\n当前主动联系已暂停；' +
+                   ('持续到用户明确恢复。' if until is None else
+                    '到 ' + local_time(until) + ' 自动结束。'))
+    if last_contact:
+        system += ('\n你上次主动发出的消息（' + local_time(last_contact['created_at']) +
+                   '）：' + last_contact['text'] + '。用户可以选择不回复。')
     if preferences:
         system += '\n以下是用户当前明确规则，优先于角色习惯及历史对话：'
     for preference in preferences:

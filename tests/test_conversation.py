@@ -213,6 +213,37 @@ class ConversationTests(unittest.TestCase):
         self.assertEqual(self.service.handle_message(first), result)
         self.assertEqual(len(self.provider.calls), 2)
 
+    def test_contact_pause_survives_restart_and_expires(self):
+        pause_call = {"id": "pause", "type": "function", "function": {
+            "name": "pause_contact", "arguments": '{"period":"this_week"}'}}
+        self.provider.responses = [
+            ({"role": "assistant", "content": None, "tool_calls": [pause_call]}, 12, 3),
+            ({"role": "assistant", "content": "这周我等你来找我。"}, 20, 5),
+        ]
+        result = self.service.handle_message(self.message("1", "这周别主动找我"))
+        self.assertEqual(result.status, "completed")
+        self.assertTrue(self.service.is_contact_paused("user", "mira"))
+        self.assertFalse(self.service.is_contact_paused("other-user", "mira"))
+        pause = self.repository.get_contact_pause("user", "mira", datetime.now(timezone.utc))
+        until = datetime.fromisoformat(pause["paused_until"])
+        self.assertEqual(until.astimezone().weekday(), 0)
+        self.assertEqual(until.astimezone().hour, 0)
+        self.assertFalse(self.service.is_contact_paused("user", "mira", until))
+        self.repository.close()
+        self.repository = ConversationRepository(self.settings.database_path)
+        self.service = ConversationService(self.settings, self.repository, self.provider)
+        self.assertTrue(self.service.is_contact_paused("user", "mira"))
+        self.service.handle_message(self.message("2", "现在聊两句"))
+        self.assertIn("当前主动联系已暂停", self.provider.calls[-1][0]["content"])
+        resume_call = {"id": "resume", "type": "function", "function": {
+            "name": "resume_contact", "arguments": "{}"}}
+        self.provider.responses = [
+            ({"role": "assistant", "content": None, "tool_calls": [resume_call]}, 12, 3),
+            ({"role": "assistant", "content": "已恢复。"}, 20, 5),
+        ]
+        self.service.handle_message(self.message("3", "可以恢复主动联系了"))
+        self.assertFalse(self.service.is_contact_paused("user", "mira"))
+
     def test_cross_day_history_has_message_times(self):
         first = replace(self.message("1", "今天下午三点面试"),
                         occurred_at="2026-11-18T15:00:00+08:00")

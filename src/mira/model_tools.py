@@ -48,4 +48,24 @@ CHAT_TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "pause_contact",
+            "description": "用户明确要求暂时不要主动联系时保存暂停。今天、这周分别用 today、this_week；没有期限用 indefinite。暂停只阻止主动联系，用户先发消息仍正常回复。含糊的少联系请求先询问范围，不要擅自暂停。",
+            "parameters": {
+                "type": "object",
+                "properties": {"period": {"type": "string", "enum": ["today", "this_week", "indefinite"]}},
+                "required": ["period"], "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "resume_contact",
+            "description": "用户明确要求恢复主动联系时取消当前暂停；不会补发暂停期间错过的消息。",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    },
 ]

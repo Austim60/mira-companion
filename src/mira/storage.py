@@ -76,12 +76,42 @@ class ConversationRepository:
                 );
                 CREATE INDEX IF NOT EXISTS preferences_active_scope
                     ON user_preferences(user_id, character_id, active);
+                CREATE TABLE IF NOT EXISTS contact_pauses (
+                    user_id TEXT NOT NULL,
+                    character_id TEXT NOT NULL REFERENCES characters(character_id),
+                    paused_until TEXT,
+                    active INTEGER NOT NULL CHECK(active IN (0,1)),
+                    source TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(user_id, character_id)
+                );
+                CREATE TABLE IF NOT EXISTS proactive_settings (
+                    user_id TEXT NOT NULL,
+                    character_id TEXT NOT NULL REFERENCES characters(character_id),
+                    enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(user_id, character_id)
+                );
+                CREATE TABLE IF NOT EXISTS proactive_decisions (
+                    id TEXT PRIMARY KEY, user_id TEXT NOT NULL,
+                    character_id TEXT NOT NULL REFERENCES characters(character_id),
+                    opportunity TEXT NOT NULL, status TEXT NOT NULL,
+                    text TEXT, reason TEXT, created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(user_id, character_id, opportunity)
+                );
             """)
             self.connection.execute(
                 "INSERT OR IGNORE INTO schema_migrations VALUES (1, ?)", (utc_now(),)
             )
             self.connection.execute(
                 "INSERT OR IGNORE INTO schema_migrations VALUES (2, ?)", (utc_now(),)
+            )
+            self.connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations VALUES (3, ?)", (utc_now(),)
+            )
+            self.connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations VALUES (4, ?)", (utc_now(),)
             )
 
     def bind_character(self, character_id, config_path):
@@ -103,6 +133,14 @@ class ConversationRepository:
             self.connection.execute(
                 "UPDATE turns SET status='failed', error_code='interrupted', updated_at=? "
                 "WHERE status='pending'", (utc_now(),)
+            )
+            self.connection.execute(
+                "UPDATE proactive_decisions SET status='skipped', reason='interrupted', "
+                "updated_at=? WHERE status='pending'", (utc_now(),)
+            )
+            self.connection.execute(
+                "UPDATE proactive_decisions SET status='unknown', reason='delivery_unknown', "
+                "updated_at=? WHERE status='sending'", (utc_now(),)
             )
 
     def create_or_get(self, message):
@@ -200,6 +238,113 @@ class ConversationRepository:
                 (utc_now(), row["id"]),
             )
             return row
+
+    def set_contact_pause(self, user_id, character_id, paused_until, source):
+        with self.connection:
+            self.connection.execute(
+                "INSERT INTO contact_pauses VALUES (?,?,?,1,?,?) "
+                "ON CONFLICT(user_id,character_id) DO UPDATE SET "
+                "paused_until=excluded.paused_until, active=1, "
+                "source=excluded.source, updated_at=excluded.updated_at",
+                (user_id, character_id, paused_until, source, utc_now()),
+            )
+
+    def resume_contact(self, user_id, character_id, source):
+        with self.connection:
+            self.connection.execute(
+                "UPDATE contact_pauses SET active=0, source=?, updated_at=? "
+                "WHERE user_id=? AND character_id=?",
+                (source, utc_now(), user_id, character_id),
+            )
+
+    def get_contact_pause(self, user_id, character_id, now):
+        row = self.connection.execute(
+            "SELECT * FROM contact_pauses WHERE user_id=? AND character_id=? AND active=1",
+            (user_id, character_id),
+        ).fetchone()
+        if row is None or (row["paused_until"] is not None and
+                           datetime.fromisoformat(row["paused_until"]) <= now):
+            return None
+        return row
+
+    def set_proactive_enabled(self, user_id, character_id, enabled):
+        with self.connection:
+            self.connection.execute(
+                "INSERT INTO proactive_settings VALUES (?,?,?,?) "
+                "ON CONFLICT(user_id,character_id) DO UPDATE SET "
+                "enabled=excluded.enabled, updated_at=excluded.updated_at",
+                (user_id, character_id, int(enabled), utc_now()),
+            )
+
+    def proactive_enabled(self, user_id, character_id):
+        row = self.connection.execute(
+            "SELECT enabled FROM proactive_settings WHERE user_id=? AND character_id=?",
+            (user_id, character_id),
+        ).fetchone()
+        return row is not None and bool(row[0])
+
+    def reserve_opportunity(self, user_id, character_id, opportunity):
+        now = utc_now()
+        with self.connection:
+            cursor = self.connection.execute(
+                "INSERT OR IGNORE INTO proactive_decisions "
+                "(id,user_id,character_id,opportunity,status,created_at,updated_at) "
+                "VALUES (?,?,?,?,'pending',?,?)",
+                (str(uuid4()), user_id, character_id, opportunity, now, now),
+            )
+            return cursor.rowcount == 1
+
+    def finish_opportunity(self, user_id, character_id, opportunity, status, text=None, reason=None):
+        with self.connection:
+            self.connection.execute(
+                "UPDATE proactive_decisions SET status=?, text=?, reason=?, updated_at=? "
+                "WHERE user_id=? AND character_id=? AND opportunity=?",
+                (status, text, reason, utc_now(), user_id, character_id, opportunity),
+            )
+
+    def claim_delivery(self, user_id, character_id, opportunity, now, day_start, text, reason):
+        with self.connection:
+            changed = self.connection.execute(
+                "UPDATE proactive_decisions SET status='sending', text=?, reason=?, updated_at=? "
+                "WHERE user_id=? AND character_id=? AND opportunity=? AND status='pending'",
+                (text, reason, utc_now(), user_id, character_id, opportunity),
+            ).rowcount
+            if changed != 1:
+                return False
+            allowed = (self.proactive_enabled(user_id, character_id) and
+                       self.get_contact_pause(user_id, character_id, now) is None and
+                       self.proactive_sent_since(user_id, character_id, day_start) == 1)
+            if not allowed:
+                self.connection.execute(
+                    "UPDATE proactive_decisions SET status='skipped', reason='boundary_changed' "
+                    "WHERE user_id=? AND character_id=? AND opportunity=?",
+                    (user_id, character_id, opportunity),
+                )
+            return allowed
+
+    def recent_proactive(self, user_id, character_id):
+        return self.connection.execute(
+            "SELECT * FROM proactive_decisions WHERE user_id=? AND character_id=? "
+            "AND status='sent' ORDER BY created_at DESC LIMIT 1",
+            (user_id, character_id),
+        ).fetchone()
+
+    def proactive_sent_since(self, user_id, character_id, since):
+        return self.connection.execute(
+            "SELECT COUNT(*) FROM proactive_decisions WHERE user_id=? AND character_id=? "
+            "AND status IN ('sending','sent','unknown') AND created_at>=?",
+            (user_id, character_id, since),
+        ).fetchone()[0]
+
+    def recent_completed_messages(self, user_id, character_id, limit):
+        return self.connection.execute(
+            "SELECT u.text AS user_text, u.occurred_at AS user_at, a.text AS assistant_text "
+            "FROM turns t JOIN messages u ON u.turn_id=t.id AND u.role='user' "
+            "JOIN messages a ON a.turn_id=t.id AND a.role='assistant' "
+            "WHERE t.user_id=? AND t.character_id=? AND t.status='completed' "
+            "ORDER BY t.sequence DESC LIMIT ?",
+            (user_id, character_id, limit),
+        ).fetchall()
 
     def history_before(self, turn, limit):
         if limit == 0:

@@ -72,7 +72,7 @@ class ProactiveService:
         opportunity = (("followup:" + follow_up["id"] + ":" if follow_up else "daily:") +
                        now.strftime("%Y-%m-%d") + ":" + window)
         if not self.repository.reserve_opportunity(
-            user_id, character_id, opportunity, follow_up["id"] if follow_up else None
+            user_id, character_id, opportunity, follow_up["id"] if follow_up else None, now
         ):
             return "already_checked"
         try:

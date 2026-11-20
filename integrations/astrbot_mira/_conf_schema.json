@@ -1,0 +1,13 @@
+{
+  "mira_root": {
+    "type": "string",
+    "description": "Mira 项目根目录的绝对路径（包含 .env 和 configs）",
+    "default": ""
+  },
+  "target_umo": {
+    "type": "string",
+    "description": "只接管这个 QQ 官方机器人私聊会话",
+    "default": "",
+    "_special": "umo"
+  }
+}

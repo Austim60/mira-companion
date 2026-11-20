@@ -43,6 +43,9 @@ class CliTests(unittest.TestCase):
                  patch("sys.stdout", output), patch(
                      "mira.cli.ProactiveService.preview",
                      return_value=("send", "预览消息", "有话题"),
+                 ), patch(
+                     "mira.cli.ProactiveService.check",
+                     return_value="recent_conversation",
                  ):
                 self.assertEqual(main(["chat"]), 0)
             self.assertIn("Mira：你好呀", output.getvalue())

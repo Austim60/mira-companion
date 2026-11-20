@@ -20,10 +20,11 @@ class Settings:
     temperature: float = 0.8
 
 
-def load_settings():
+def load_settings(root=None):
     # A local .env supplies defaults; the process environment takes precedence.
     values = {}
-    path = Path('.env')
+    root = Path(root) if root is not None else Path.cwd()
+    path = root / '.env'
     if path.exists():
         for line in path.read_text(encoding='utf-8-sig').splitlines():
             line = line.strip()
@@ -36,8 +37,11 @@ def load_settings():
     def get(name, default=''):
         return values.get('MIRA_' + name, default)
     try:
+        database_path = Path(get('DATABASE_PATH', 'data/mira.sqlite3'))
+        character_path = Path(get('CHARACTER_PATH', 'configs/character.json'))
         result = Settings(get('MODEL_BASE_URL'), get('MODEL_API_KEY'), get('MODEL_NAME'),
-            get('DATABASE_PATH', 'data/mira.sqlite3'), get('CHARACTER_PATH', 'configs/character.json'),
+            str(database_path if database_path.is_absolute() else root / database_path),
+            str(character_path if character_path.is_absolute() else root / character_path),
             float(get('TIMEOUT_SECONDS', '60')), int(get('MAX_OUTPUT_TOKENS', '512')),
             int(get('HISTORY_TURNS', '10')), int(get('CONTEXT_CHAR_BUDGET', '12000')),
             float(get('TEMPERATURE', '0.8')))

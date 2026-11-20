@@ -56,6 +56,21 @@ D:\miniconda3\envs\mira\python.exe -m mira.cli chat
 
 想立即试模型判断，在当前聊天输入 `/proactive preview`：它使用近期对话生成一条预览或给出跳过原因，不要求开启授权，不受六小时和时间窗口限制，也不会发送或占用当天名额。输入 `/proactive check` 可手动执行一次正式检查，仍会遵守授权、暂停、时段和频率规则；条件允许且模型决定联系时会在当前终端输出消息。
 
+## AstrBot QQ 接入
+
+`integrations/astrbot_mira/` 是 QQ 官方机器人 WebSocket 的 AstrBot 插件：AstrBot 负责接收与发送，Mira 负责对话、资料和主动联系判断。插件只接管配置的一个 QQ 私聊会话，使用与本地终端相同的 `local-user`、角色配置和 SQLite 数据库；不要同时运行本地聊天终端的主动检查。插件内的定时检查随 AstrBot 启停，无需另开 Mira 进程。
+
+在已有的 `astrbot` 环境中安装当前项目，再把插件目录放入 AstrBot 的 `data/plugins/astrbot_mira/`：
+
+```powershell
+D:\miniconda3\envs\astrbot\python.exe -m pip install --no-build-isolation --no-deps -e D:\Code\AI_girlfriend\mira-companion
+Copy-Item -LiteralPath D:\Code\AI_girlfriend\mira-companion\integrations\astrbot_mira -Destination D:\Code\AI_girlfriend\reference-projects\AstrBot\data\plugins\astrbot_mira -Recurse
+```
+
+本机已完成安装、插件复制，并把 `mira_root` 和唯一已记录的 QQ 官方机器人私聊会话写入 AstrBot 的本地插件配置。启动 AstrBot 后，可在 WebUI 的插件配置中核对或更改 `target_umo`，然后重载插件；其他机器需自行选定目标会话。未配置目标会话时插件不会接管消息。模型密钥仍从 Mira 项目根目录的 `.env` 读取，不填入插件配置。
+
+在目标 QQ 私聊中发送普通文字，应只收到 Mira 的回复；本机已完成一次真实 QQ 私聊回复验证，消息在 Mira 数据库中只记录了一轮。发送 `/mira status` 查看状态，`/mira on` 或 `/mira off` 控制主动联系；`/mira preview` 只预览，`/mira check` 按真实时段和频率规则检查。普通对话和主动消息都走 AstrBot 已配置的 QQ 官方机器人通道。重复的平台消息 ID 不会让模型再次回复；平台发送结果不确定时，主动消息不会自动重发。QQ 主动投递的跨天送达、客户端权限和断线恢复仍需实测。
+
 普通对话会把近期消息的发送时间一并交给模型，帮助区分跨天的“今天”和“昨天”。模型可自行调用历史工具，读取本轮之前最近 20 条用户原文及发送时间，再生成最终回复；工具结果不会直接显示为 Mira 的回答。终端命令不计入聊天记录。模型仍可能不调用工具或理解有误，重要回忆需要你核对。
 
 运行自动测试：

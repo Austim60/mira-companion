@@ -207,6 +207,13 @@ class ConversationRepository:
     def get_turn(self, turn_id):
         return self.connection.execute("SELECT * FROM turns WHERE id=?", (turn_id,)).fetchone()
 
+    def find_turn_by_source(self, user_id, character_id, source, source_message_id):
+        return self.connection.execute(
+            "SELECT * FROM turns WHERE user_id=? AND character_id=? "
+            "AND source=? AND source_message_id=?",
+            (user_id, character_id, source, source_message_id),
+        ).fetchone()
+
     def user_message(self, turn_id):
         return self.connection.execute(
             "SELECT * FROM messages WHERE turn_id=? AND role='user'", (turn_id,)
@@ -319,8 +326,9 @@ class ConversationRepository:
         ).fetchone()
         return row is not None and bool(row[0])
 
-    def reserve_opportunity(self, user_id, character_id, opportunity, follow_up_id=None):
-        now = utc_now()
+    def reserve_opportunity(self, user_id, character_id, opportunity, follow_up_id=None,
+                            now=None):
+        now = now.astimezone(timezone.utc).isoformat() if now else utc_now()
         with self.connection:
             cursor = self.connection.execute(
                 "INSERT OR IGNORE INTO proactive_decisions "

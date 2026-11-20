@@ -1,0 +1,7 @@
+name: astrbot_mira
+display_name: Mira QQ 接入
+desc: 将指定 QQ 官方机器人私聊交给 Mira 对话核心处理
+version: 0.1.0
+author: mira-companion
+support_platforms:
+  - qq_official

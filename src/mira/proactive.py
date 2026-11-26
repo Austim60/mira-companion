@@ -22,6 +22,30 @@ DECISION_TOOLS = [
 ]
 
 
+PROACTIVE_RESULT_MESSAGES = {
+    "disabled": "主动联系尚未开启",
+    "paused": "主动联系已暂停",
+    "quiet_hours": "当前不在主动联系时段（09:00—22:00）",
+    "daily_limit": "今天已达到主动联系上限",
+    "recent_conversation": "最近六小时聊过天，暂不主动联系",
+    "awaiting_reply": "上一条主动消息尚未得到回复，暂不重复联系",
+    "no_conversation": "暂无可参考的对话",
+    "already_checked": "当前时段已经检查过，不会重复检查",
+    "skipped": "模型决定这次不联系",
+    "sent": "已发送主动消息",
+    "boundary_changed": "发送前条件发生变化，本次未发送",
+    "stopped": "检查已停止，本次未发送",
+    "avoided_topic": "拟发送内容涉及你不希望讨论的话题，本次未发送",
+    "delivery_unknown": "发送结果不确定，请查看聊天记录；本次不会自动重发",
+    "invalid_proactive_decision": "模型的判断结果无效，本次未发送",
+}
+
+
+def proactive_result_message(result):
+    """Translate a proactive check result for user-facing commands."""
+    return PROACTIVE_RESULT_MESSAGES.get(result, "检查未完成，请查看运行日志")
+
+
 class ProactiveService:
     """Check a time window once, then ask the model whether to contact."""
 

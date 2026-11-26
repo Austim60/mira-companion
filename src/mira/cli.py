@@ -10,7 +10,7 @@ from .config import load_character, load_settings
 from .conversation import ConversationService
 from .models import MessageInput, MiraError
 from .provider import OpenAICompatibleProvider
-from .proactive import ProactiveService
+from .proactive import ProactiveService, proactive_result_message
 from .storage import ConversationRepository
 
 
@@ -29,15 +29,6 @@ COMMAND_USAGE = {
     "/exit": "用法：/exit（退出聊天）",
 }
 ARGUMENT_COMMANDS = {"/name", "/style", "/avoid", "/correct", "/remove", "/proactive"}
-PROACTIVE_RESULTS = {
-    "disabled": "尚未开启", "paused": "主动联系已暂停", "quiet_hours": "当前不在联系时段",
-    "daily_limit": "今天已达到上限", "recent_conversation": "最近六小时聊过天",
-    "awaiting_reply": "上一条主动消息尚未得到回复", "no_conversation": "暂无可参考的对话",
-    "already_checked": "当前时段已经检查过", "skipped": "模型决定这次不联系",
-    "sent": "已在当前聊天输出主动消息", "boundary_changed": "发送前的边界条件已变化",
-}
-
-
 def _run_proactive(settings, user_id, character, stop, wake):
     repository = ConversationRepository(settings.database_path)
     try:
@@ -50,7 +41,7 @@ def _run_proactive(settings, user_id, character, stop, wake):
             try:
                 result = proactive.check(user_id, character["character_id"])
                 if result in {"delivery_unknown", "invalid_proactive_decision"}:
-                    print("\n主动联系检查：" + result, flush=True)
+                    print("\n主动联系检查：" + proactive_result_message(result), flush=True)
             except Exception as exc:
                 print("\n主动联系检查失败：" + getattr(exc, "code", type(exc).__name__), flush=True)
             wake.wait(60)
@@ -127,10 +118,10 @@ def main(argv=None):
                         elif choice == "skip":
                             print("模型决定跳过（未发送）：" + reason)
                         else:
-                            print("预览结果：" + PROACTIVE_RESULTS.get(choice, choice))
+                            print("预览结果：" + proactive_result_message(choice))
                     else:
                         result = proactive.check(user_id, character_id)
-                        print("主动联系检查：" + PROACTIVE_RESULTS.get(result, result))
+                        print("主动联系检查：" + proactive_result_message(result))
                     continue
                 if line == "/retry":
                     latest = service.latest_turn(user_id, character_id)

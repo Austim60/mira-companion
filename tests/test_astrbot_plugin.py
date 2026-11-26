@@ -55,10 +55,13 @@ class SendProvider(FakeProvider):
 
 
 class FakeEvent:
-    def __init__(self, message_id, text):
+    def __init__(self, message_id, text, raw_text=None):
         self.unified_msg_origin = "qq_official:FriendMessage:test-openid"
         self.message_str = text
-        self.message_obj = SimpleNamespace(message_id=message_id, timestamp=1795000000)
+        self.message_obj = SimpleNamespace(
+            message_id=message_id, timestamp=1795000000,
+            message_str=text if raw_text is None else raw_text,
+        )
         self.stopped = False
 
     def plain_result(self, text):
@@ -110,23 +113,34 @@ class AstrBotPluginTests(unittest.TestCase):
                         first_results = [item async for item in plugin.on_private_message(first)]
                         repeated = FakeEvent("message-1", "你好")
                         repeated_results = [item async for item in plugin.on_private_message(repeated)]
-                        enabled = FakeEvent("message-2", "/mira on")
+                        enabled = FakeEvent("message-2", "mira on", "/mira on")
                         enabled_results = [item async for item in plugin.on_private_message(enabled)]
-                        return first, first_results, repeated, repeated_results, enabled, enabled_results
+                        ordinary = FakeEvent("message-3", "mira status")
+                        ordinary_results = [item async for item in plugin.on_private_message(ordinary)]
+                        status = FakeEvent("message-4", "mira status", "/mira status")
+                        status_results = [item async for item in plugin.on_private_message(status)]
+                        return (first, first_results, repeated, repeated_results,
+                                enabled, enabled_results, ordinary, ordinary_results,
+                                status, status_results)
                     finally:
                         await plugin.terminate()
 
-                first, first_results, repeated, repeated_results, enabled, enabled_results = asyncio.run(run())
+                (first, first_results, repeated, repeated_results, enabled,
+                 enabled_results, ordinary, ordinary_results, status,
+                 status_results) = asyncio.run(run())
             self.assertEqual(first_results, ["你好呀"])
             self.assertEqual(repeated_results, [])
-            self.assertTrue(first.stopped and repeated.stopped and enabled.stopped)
+            self.assertTrue(all(event.stopped for event in
+                                (first, repeated, enabled, ordinary, status)))
             self.assertIn("主动联系：开启", enabled_results[0])
-            self.assertEqual(FakeProvider.chat_calls, 1)
+            self.assertEqual(ordinary_results, ["你好呀"])
+            self.assertEqual(status_results, ["主动联系：开启；暂停：否"])
+            self.assertEqual(FakeProvider.chat_calls, 2)
             repository = ConversationRepository(load_settings(root).database_path)
             try:
                 self.assertEqual(repository.connection.execute(
                     "SELECT COUNT(*) FROM turns"
-                ).fetchone()[0], 1)
+                ).fetchone()[0], 2)
                 self.assertTrue(repository.proactive_enabled("local-user", "mira"))
             finally:
                 repository.close()
@@ -179,3 +193,38 @@ class AstrBotPluginTests(unittest.TestCase):
             self.assertEqual(context.sent, [
                 ("qq_official:FriendMessage:test-openid", "面试怎么样？")
             ])
+
+    def test_proactive_commands_show_chinese_results(self):
+        with tempfile.TemporaryDirectory() as directory:
+            plugin = plugin_module.MiraQQPlugin(None, {
+                "mira_root": str(self.make_root(directory)),
+                "target_umo": "qq_official:FriendMessage:test-openid",
+            })
+            with patch.object(plugin_module.ProactiveService, "check",
+                              side_effect=["recent_conversation", "delivery_unknown"]), \
+                 patch.object(plugin_module.ProactiveService, "preview",
+                              return_value=("no_conversation", None, None)):
+                self.assertEqual(
+                    plugin._proactive_command("check", None),
+                    "主动联系检查：最近六小时聊过天，暂不主动联系",
+                )
+                self.assertEqual(
+                    plugin._proactive_command("check", None),
+                    "主动联系检查：发送结果不确定，请查看聊天记录；本次不会自动重发",
+                )
+                self.assertEqual(
+                    plugin._proactive_command("preview", None),
+                    "预览（未发送）：暂无可参考的对话",
+                )
+
+    def test_qq_outbound_test_uses_proactive_delivery_path(self):
+        context = FakeContext()
+        plugin = plugin_module.MiraQQPlugin(context, {
+            "mira_root": "D:/mira-test",
+            "target_umo": "qq_official:FriendMessage:test-openid",
+        })
+        result = asyncio.run(plugin._command("/mira test"))
+        self.assertIn("已提交", result)
+        self.assertEqual(context.sent, [
+            ("qq_official:FriendMessage:test-openid", plugin_module.QQ_SEND_TEST_MESSAGE)
+        ])

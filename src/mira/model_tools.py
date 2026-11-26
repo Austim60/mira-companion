@@ -5,6 +5,57 @@ CHAT_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "list_memories",
+            "description": "列出当前用户与角色仍有效的长期记忆，返回可用于核对、更正、忘记的 ID。",
+            "parameters": {"type": "object", "properties": {
+                "query": {"type": "string", "description": "可选主题筛选"}
+            }, "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_memory_source",
+            "description": "用户要核对某条长期记忆的原话时，按 list_memories 给出的 ID 读取来源。",
+            "parameters": {"type": "object", "properties": {
+                "id": {"type": "string"}
+            }, "required": ["id"], "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "remember_memory",
+            "description": "用户明确要求记住当前原话中的某件事时立即保存。content 必须是当前用户原话中的连续原文片段。",
+            "parameters": {"type": "object", "properties": {
+                "content": {"type": "string"},
+                "kind": {"type": "string", "enum": ["daily_fragment", "interest", "user_fact", "episode", "important_event", "shared_experience", "plan"]}
+            }, "required": ["content", "kind"], "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "correct_memory",
+            "description": "用户明确更正指定记忆时使用。content 必须是当前用户原话中的连续更正片段。",
+            "parameters": {"type": "object", "properties": {
+                "id": {"type": "string"}, "content": {"type": "string"}
+            }, "required": ["id", "content"], "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "forget_memory",
+            "description": "用户明确要求忘记指定记忆时使用；会阻止对应原话再次进入模型上下文。",
+            "parameters": {"type": "object", "properties": {
+                "id": {"type": "string"}
+            }, "required": ["id"], "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_recent_user_messages",
             "description": "读取当前用户与角色在本轮之前保存的最近 20 条用户原文及发送时间。核对用户过去说过什么时使用；不包含未发送给模型的 /help、/exit 等终端控制命令。",
             "parameters": {"type": "object", "properties": {}, "additionalProperties": False},

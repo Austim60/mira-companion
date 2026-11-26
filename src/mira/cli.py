@@ -9,6 +9,7 @@ from uuid import uuid4
 from .config import load_character, load_settings
 from .conversation import ConversationService
 from .models import MessageInput, MiraError
+from .memory import MemoryService
 from .provider import OpenAICompatibleProvider
 from .proactive import ProactiveService, proactive_result_message
 from .storage import ConversationRepository
@@ -32,12 +33,18 @@ ARGUMENT_COMMANDS = {"/name", "/style", "/avoid", "/correct", "/remove", "/proac
 def _run_proactive(settings, user_id, character, stop, wake):
     repository = ConversationRepository(settings.database_path)
     try:
+        provider = OpenAICompatibleProvider(settings)
+        memory = MemoryService(settings, repository, provider)
         proactive = ProactiveService(
-            settings, repository, OpenAICompatibleProvider(settings),
+            settings, repository, provider,
             lambda text: print(f"\n{character['display_name']}：{text}\n> ", end="", flush=True),
             should_stop=stop.is_set,
         )
         while not stop.is_set():
+            try:
+                memory.run_due()
+            except Exception as exc:
+                print("\n记忆整理失败：" + getattr(exc, "code", type(exc).__name__), flush=True)
             try:
                 result = proactive.check(user_id, character["character_id"])
                 if result in {"delivery_unknown", "invalid_proactive_decision"}:

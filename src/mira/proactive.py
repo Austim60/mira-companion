@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 from .config import load_character
 from .models import MiraError
+from .memory import MemoryService
 
 
 DECISION_TOOLS = [
@@ -201,6 +202,12 @@ class ProactiveService:
                        "。最早联系时间：" + follow_up["due_at"] +
                        "；过期时间：" + follow_up["expires_at"] +
                        "。如果近期对话表明事项已取消或结果已说过，调用 skip_proactive。")
+            memories = MemoryService(
+                self.settings, self.repository, self.provider, self.clock
+            ).recall(user_id, character_id, follow_up["topic"], limit=2,
+                     proactive=True)
+            for memory in memories:
+                system += "\n相关记忆（" + memory["occurred_at"] + "）：" + memory["text"]
         preferences = self.repository.list_preferences(user_id, character_id)
         if preferences:
             system += "\n用户当前明确规则：" + "；".join(
@@ -209,7 +216,9 @@ class ProactiveService:
         last_contact = self.repository.recent_proactive(user_id, character_id)
         if last_contact:
             system += "\n上次主动联系：" + last_contact["text"]
-        rows = self.repository.recent_completed_messages(user_id, character_id, 5)
+        rows = self.repository.recent_completed_messages(
+            user_id, character_id, 5, for_context=True
+        )
         messages = [{"role": "system", "content": system}]
         for row in reversed(rows):
             messages.append({"role": "user", "content": "[" + row["user_at"] + "] " + row["user_text"][:400]})

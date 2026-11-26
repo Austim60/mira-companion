@@ -58,7 +58,7 @@ D:\miniconda3\envs\mira\python.exe -m mira.cli chat
 
 ## AstrBot QQ 接入
 
-`integrations/astrbot_mira/` 是 QQ 官方机器人 WebSocket 的 AstrBot 插件：AstrBot 负责接收与发送，Mira 负责对话、资料和主动联系判断。插件只接管配置的一个 QQ 私聊会话，使用与本地终端相同的 `local-user`、角色配置和 SQLite 数据库；不要同时运行本地聊天终端的主动检查。插件内的定时检查随 AstrBot 启停，无需另开 Mira 进程。
+`integrations/astrbot_mira/` 是 QQ 官方机器人 WebSocket 的 AstrBot 插件：AstrBot 负责接收与发送，Mira 负责对话、长期记忆整理与召回、主动联系判断。插件只接管配置的一个 QQ 私聊会话，使用与本地终端相同的 `local-user`、角色配置和 SQLite 数据库；不要同时运行本地聊天终端的定时检查。插件内每分钟检查暂歇后的记忆任务、夜间巩固和主动联系，随 AstrBot 启停，重启后会补做未完成的记忆任务，无需另开 Mira 进程。
 
 在已有的 `astrbot` 环境中安装当前项目，再把插件目录放入 AstrBot 的 `data/plugins/astrbot_mira/`：
 

@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
+from .memory_storage import migrate_memory
 from .models import MiraError
 
 
@@ -140,6 +141,7 @@ class ConversationRepository:
             self.connection.execute(
                 "INSERT OR IGNORE INTO schema_migrations VALUES (6, ?)", (utc_now(),)
             )
+            migrate_memory(self.connection)
 
     def bind_character(self, character_id, config_path):
         existing = self.connection.execute("SELECT character_id FROM characters").fetchall()
@@ -399,12 +401,14 @@ class ConversationRepository:
             (user_id, character_id, since),
         ).fetchone()[0]
 
-    def recent_completed_messages(self, user_id, character_id, limit):
+    def recent_completed_messages(self, user_id, character_id, limit, for_context=False):
         return self.connection.execute(
             "SELECT u.text AS user_text, u.occurred_at AS user_at, a.text AS assistant_text "
             "FROM turns t JOIN messages u ON u.turn_id=t.id AND u.role='user' "
             "JOIN messages a ON a.turn_id=t.id AND a.role='assistant' "
             "WHERE t.user_id=? AND t.character_id=? AND t.status='completed' "
+            + ("AND NOT EXISTS (SELECT 1 FROM memory_suppressions s WHERE s.turn_id=t.id) "
+               if for_context else "") +
             "ORDER BY t.sequence DESC LIMIT ?",
             (user_id, character_id, limit),
         ).fetchall()
@@ -432,6 +436,11 @@ class ConversationRepository:
 
     def close_follow_up(self, user_id, character_id, follow_up_id, status):
         with self.connection:
+            follow_up = self.connection.execute(
+                "SELECT source_turn_id FROM follow_ups WHERE id=? AND user_id=? "
+                "AND character_id=? AND status='pending'",
+                (follow_up_id, user_id, character_id),
+            ).fetchone()
             changed = self.connection.execute(
                 "UPDATE follow_ups SET status=?, updated_at=? "
                 "WHERE id=? AND user_id=? AND character_id=? AND status='pending'",
@@ -439,6 +448,18 @@ class ConversationRepository:
             ).rowcount
             if changed != 1:
                 raise MiraError("follow_up_not_found")
+            plans = self.connection.execute(
+                "SELECT m.id FROM memory_items m JOIN memory_sources s "
+                "ON s.memory_id=m.id WHERE s.turn_id=? AND m.user_id=? "
+                "AND m.character_id=? AND m.kind='plan' AND m.status='open'",
+                (follow_up["source_turn_id"], user_id, character_id),
+            ).fetchall()
+            if len(plans) == 1:
+                self.connection.execute(
+                    "UPDATE memory_items SET status=?,version=version+1,updated_at=? "
+                    "WHERE id=?",
+                    (status, utc_now(), plans[0]["id"]),
+                )
 
     def due_follow_up(self, user_id, character_id, now):
         timestamp = now.astimezone(timezone.utc).isoformat()
@@ -468,7 +489,9 @@ class ConversationRepository:
             "JOIN messages u ON u.turn_id=t.id AND u.role='user' "
             "JOIN messages a ON a.turn_id=t.id AND a.role='assistant' "
             "WHERE t.user_id=? AND t.character_id=? AND t.sequence<? "
-            "AND t.status='completed' ORDER BY t.sequence DESC LIMIT ?",
+            "AND t.status='completed' "
+            "AND NOT EXISTS (SELECT 1 FROM memory_suppressions s WHERE s.turn_id=t.id) "
+            "ORDER BY t.sequence DESC LIMIT ?",
             (turn["user_id"], turn["character_id"], turn["sequence"], limit),
         ).fetchall()
         return [(row["user_text"], row["assistant_text"], row["user_occurred_at"])
@@ -477,13 +500,16 @@ class ConversationRepository:
     def user_messages_before(self, turn, limit):
         scope = (turn["user_id"], turn["character_id"], turn["sequence"])
         total = self.connection.execute(
-            "SELECT COUNT(*) FROM turns WHERE user_id=? AND character_id=? AND sequence<?",
+            "SELECT COUNT(*) FROM turns t WHERE user_id=? AND character_id=? "
+            "AND sequence<? AND NOT EXISTS "
+            "(SELECT 1 FROM memory_suppressions s WHERE s.turn_id=t.id)",
             scope,
         ).fetchone()[0]
         rows = self.connection.execute(
             "SELECT m.text, m.occurred_at FROM turns t "
             "JOIN messages m ON m.turn_id=t.id AND m.role='user' "
             "WHERE t.user_id=? AND t.character_id=? AND t.sequence<? "
+            "AND NOT EXISTS (SELECT 1 FROM memory_suppressions s WHERE s.turn_id=t.id) "
             "ORDER BY t.sequence DESC LIMIT ?", (*scope, limit),
         ).fetchall()
         return total, list(reversed(rows))
@@ -536,6 +562,11 @@ class ConversationRepository:
                 self.connection.execute(
                     "DELETE FROM follow_ups WHERE source_turn_id=? AND status='pending'",
                     (turn_id,),
+                )
+            elif status == "completed":
+                self.connection.execute(
+                    "INSERT OR IGNORE INTO memory_jobs (turn_id,queued_at) VALUES (?,?)",
+                    (turn_id, now),
                 )
 
     def mark_failed(self, turn_id, error_code):

@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from .config import load_character
 from .context import build_context, local_time
 from .model_tools import CHAT_TOOLS
+from .memory import MemoryService
 from .models import ConversationResult, MiraError
 
 
@@ -17,6 +18,7 @@ class ConversationService:
         self.settings = settings
         self.repository = repository
         self.provider = provider
+        self.memory = MemoryService(settings, repository, provider)
 
     def _character(self):
         character = load_character(self.settings.character_path)
@@ -137,6 +139,40 @@ class ConversationService:
             if not isinstance(arguments, dict):
                 raise MiraError("invalid_tool_arguments")
             name = call["function"]["name"]
+            if name == "list_memories":
+                if set(arguments) - {"query"} or not isinstance(arguments.get("query", ""), str):
+                    raise MiraError("invalid_tool_arguments")
+                return {"memories": self.memory.list_memories(
+                    turn["user_id"], turn["character_id"], arguments.get("query")
+                )}
+            if name == "get_memory_source":
+                if set(arguments) != {"id"} or not isinstance(arguments["id"], str):
+                    raise MiraError("invalid_tool_arguments")
+                return {"sources": self.memory.source(
+                    turn["user_id"], turn["character_id"], arguments["id"]
+                )}
+            if name == "remember_memory":
+                if (set(arguments) != {"content", "kind"} or
+                    not isinstance(arguments["content"], str) or
+                    not isinstance(arguments["kind"], str)):
+                    raise MiraError("invalid_tool_arguments")
+                memory_id = self.memory.remember(turn, arguments["content"], arguments["kind"])
+                return {"saved": True, "id": memory_id}
+            if name == "correct_memory":
+                if (set(arguments) != {"id", "content"} or
+                    any(not isinstance(value, str) for value in arguments.values())):
+                    raise MiraError("invalid_tool_arguments")
+                memory_id = self.memory.correct(
+                    turn["user_id"], turn["character_id"], arguments["id"],
+                    turn["id"], arguments["content"],
+                )
+                return {"corrected": True, "id": memory_id}
+            if name == "forget_memory":
+                if set(arguments) != {"id"} or not isinstance(arguments["id"], str):
+                    raise MiraError("invalid_tool_arguments")
+                self.memory.forget(turn["user_id"], turn["character_id"],
+                                   arguments["id"], turn["id"])
+                return {"forgotten": True}
             if name == "get_recent_user_messages":
                 if arguments:
                     raise MiraError("invalid_tool_arguments")
@@ -267,9 +303,14 @@ class ConversationService:
             follow_ups = self.repository.list_follow_ups(
                 turn["user_id"], turn["character_id"]
             )
+            memories = self.memory.recall(
+                turn["user_id"], turn["character_id"], user_message["text"], turn_id
+            )
+            handoff = self.memory.handoff(turn["user_id"], turn["character_id"])
             messages = build_context(character, history, user_message["text"],
                                      user_message["occurred_at"], self.settings.char_budget,
-                                     preferences, contact_pause, last_contact, follow_ups)
+                                     preferences, contact_pause, last_contact, follow_ups,
+                                     memories, handoff)
         except MiraError as exc:
             self.repository.mark_failed(turn_id, exc.code)
             return self._result(self.repository.get_turn(turn_id))

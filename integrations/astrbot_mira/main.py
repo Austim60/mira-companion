@@ -13,6 +13,7 @@ from astrbot.api.star import Context, Star
 from mira.config import load_character, load_settings
 from mira.conversation import ConversationService
 from mira.models import MessageInput
+from mira.memory import MemoryService
 from mira.provider import OpenAICompatibleProvider
 from mira.proactive import ProactiveService
 from mira.storage import ConversationRepository
@@ -204,6 +205,14 @@ class MiraQQPlugin(Star):
             should_stop=self._stop.is_set,
         )
 
+    def _memory_check(self):
+        settings = load_settings(self.root)
+        repository = ConversationRepository(settings.database_path)
+        try:
+            MemoryService(settings, repository, OpenAICompatibleProvider(settings)).run_due()
+        finally:
+            repository.close()
+
     async def _send_qq_message(self, text):
         if not await self.context.send_message(self.target_umo, MessageChain().message(text)):
             raise RuntimeError("QQ session unavailable")
@@ -216,6 +225,10 @@ class MiraQQPlugin(Star):
     async def _timer_loop(self):
         loop = asyncio.get_running_loop()
         while not self._stop.is_set():
+            try:
+                await asyncio.to_thread(self._memory_check)
+            except Exception:
+                logger.exception("Mira QQ memory check failed")
             try:
                 await asyncio.to_thread(self._proactive_command, "check", loop)
             except Exception:

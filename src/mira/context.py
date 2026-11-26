@@ -8,7 +8,7 @@ def local_time(occurred_at):
 
 
 def build_context(character, history, current, current_at, budget, preferences=(),
-                  contact_pause=None, last_contact=None, follow_ups=()):
+                  contact_pause=None, last_contact=None, follow_ups=(), memories=(), handoff=None):
     system = ("你是虚拟角色，以下是角色设定。尊重用户的现实生活与自主选择。\n" +
               "角色名称：" + character['display_name'] + "\n性格：" + character['personality'] +
               "\n表达习惯：" + character['speaking_style'] + "\n背景（角色设定）：" + character['background'] +
@@ -37,6 +37,9 @@ def build_context(character, history, current, current_at, budget, preferences=(
                "保存候选不保证届时会联系，仍受时段、暂停、频率和当时判断限制；不要承诺一定会来问。"
                "用户说不用跟进时，只确认不再主动询问该事项，不要扩大为永远不再提及；"
                "这一轮也不要继续追问该事项或用户对此的感受。")
+    system += ("用户明确要求记住、查看、核对原话、更正或忘记记忆时，按意图使用记忆工具。"
+               "只有工具确认成功才能说已经保存、更正或忘记。"
+               "下方的记忆是有来源的检索结果，不是用户当前原话；不得把概括当作逐字引述。")
     if contact_pause:
         until = contact_pause['paused_until']
         system += ('\n当前主动联系已暂停；' +
@@ -73,6 +76,18 @@ def build_context(character, history, current, current_at, budget, preferences=(
             break
         selected.append((stamped_user, assistant))
         size += cost
+    if handoff:
+        line = '\n近期未完话题：' + handoff
+        if size + len(line) <= budget:
+            system += line
+            size += len(line)
+    for item in memories:
+        line = ('\n相关记忆[' + item['id'] + ']（' + item['kind'] + '，' +
+                local_time(item['occurred_at']) + '）：' + item['text'])
+        if size + len(line) > budget:
+            break
+        system += line
+        size += len(line)
     messages = [{'role': 'system', 'content': system}]
     for user, assistant in reversed(selected):
         messages.extend([{'role': 'user', 'content': user}, {'role': 'assistant', 'content': assistant}])

@@ -229,7 +229,7 @@ class ConversationRepository:
     def latest_turn(self, user_id, character_id):
         return self.connection.execute(
             "SELECT * FROM turns WHERE user_id=? AND character_id=? "
-            "ORDER BY sequence DESC LIMIT 1", (user_id, character_id)
+            "AND source<>'admin' ORDER BY sequence DESC LIMIT 1", (user_id, character_id)
         ).fetchone()
 
     def set_preference(self, user_id, character_id, kind, key, value, source):
@@ -407,6 +407,7 @@ class ConversationRepository:
             "FROM turns t JOIN messages u ON u.turn_id=t.id AND u.role='user' "
             "JOIN messages a ON a.turn_id=t.id AND a.role='assistant' "
             "WHERE t.user_id=? AND t.character_id=? AND t.status='completed' "
+            "AND t.source<>'admin' "
             + ("AND NOT EXISTS (SELECT 1 FROM memory_suppressions s WHERE s.turn_id=t.id) "
                if for_context else "") +
             "ORDER BY t.sequence DESC LIMIT ?",
@@ -489,7 +490,7 @@ class ConversationRepository:
             "JOIN messages u ON u.turn_id=t.id AND u.role='user' "
             "JOIN messages a ON a.turn_id=t.id AND a.role='assistant' "
             "WHERE t.user_id=? AND t.character_id=? AND t.sequence<? "
-            "AND t.status='completed' "
+            "AND t.status='completed' AND t.source<>'admin' "
             "AND NOT EXISTS (SELECT 1 FROM memory_suppressions s WHERE s.turn_id=t.id) "
             "ORDER BY t.sequence DESC LIMIT ?",
             (turn["user_id"], turn["character_id"], turn["sequence"], limit),
@@ -501,7 +502,7 @@ class ConversationRepository:
         scope = (turn["user_id"], turn["character_id"], turn["sequence"])
         total = self.connection.execute(
             "SELECT COUNT(*) FROM turns t WHERE user_id=? AND character_id=? "
-            "AND sequence<? AND NOT EXISTS "
+            "AND sequence<? AND source<>'admin' AND NOT EXISTS "
             "(SELECT 1 FROM memory_suppressions s WHERE s.turn_id=t.id)",
             scope,
         ).fetchone()[0]
@@ -509,6 +510,7 @@ class ConversationRepository:
             "SELECT m.text, m.occurred_at FROM turns t "
             "JOIN messages m ON m.turn_id=t.id AND m.role='user' "
             "WHERE t.user_id=? AND t.character_id=? AND t.sequence<? "
+            "AND t.source<>'admin' "
             "AND NOT EXISTS (SELECT 1 FROM memory_suppressions s WHERE s.turn_id=t.id) "
             "ORDER BY t.sequence DESC LIMIT ?", (*scope, limit),
         ).fetchall()

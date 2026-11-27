@@ -107,6 +107,12 @@ def migrate_memory(connection):
         "INSERT OR IGNORE INTO schema_migrations VALUES (7, ?)",
         (datetime.now(timezone.utc).isoformat(),),
     )
+    if "category" not in {row[1] for row in connection.execute("PRAGMA table_info(memory_items)")}:
+        connection.execute("ALTER TABLE memory_items ADD COLUMN category TEXT NOT NULL DEFAULT ''")
+    connection.execute(
+        "INSERT OR IGNORE INTO schema_migrations VALUES (8, ?)",
+        (datetime.now(timezone.utc).isoformat(),),
+    )
     connection.execute(
         "INSERT OR IGNORE INTO memory_jobs (turn_id,queued_at) "
         "SELECT id,updated_at FROM turns WHERE status='completed'"
@@ -153,7 +159,7 @@ class MemoryRepository:
     def latest_completed_at(self, user_id, character_id):
         row = self.connection.execute(
             "SELECT MAX(updated_at) FROM turns WHERE user_id=? AND character_id=? "
-            "AND status='completed'",
+            "AND status='completed' AND source<>'admin'",
             (user_id, character_id),
         ).fetchone()
         return row[0]
@@ -337,6 +343,79 @@ class MemoryRepository:
             (memory_id, user_id, character_id),
         ).fetchone()
 
+    def list_for_admin(self, user_id, character_id):
+        """Include candidates and disputes in the dashboard review queue."""
+        return self.connection.execute(
+            "SELECT m.* FROM memory_items m WHERE m.user_id=? AND m.character_id=? "
+            "AND m.status IN ('active','open','resolved','candidate','disputed') "
+            "AND EXISTS (SELECT 1 FROM memory_sources s WHERE s.memory_id=m.id "
+            "AND NOT EXISTS (SELECT 1 FROM memory_suppressions x WHERE x.turn_id=s.turn_id)) "
+            "ORDER BY m.updated_at DESC, m.id", (user_id, character_id),
+        ).fetchall()
+
+    def organize(self, user_id, character_id, memory_id, category, kind, confirm=False):
+        """Apply a reviewed category or type and optionally confirm a factual candidate."""
+        from .memory import KINDS
+        category = category.strip()
+        if len(category) > 40 or kind not in KINDS:
+            raise MiraError("invalid_memory_organization")
+        now = datetime.now(timezone.utc).isoformat()
+        with self.connection:
+            item = self.get_item(user_id, character_id, memory_id)
+            if item is None or item["status"] not in {"active", "open", "resolved", "candidate", "disputed"}:
+                raise MiraError("memory_not_found")
+            if confirm and (item["status"] not in {"candidate", "disputed"} or
+                            item["claim_mode"] != "asserted" and
+                            not (item["claim_mode"] == "planned" and kind == "plan")):
+                raise MiraError("invalid_memory_confirmation")
+            status = ("open" if kind == "plan" and item["claim_mode"] == "planned"
+                      else "active") if confirm else item["status"]
+            changed = kind != item["kind"] or status != item["status"]
+            self.connection.execute(
+                "UPDATE memory_items SET category=?,kind=?,status=?,importance=?,"
+                "version=version+?,updated_at=? WHERE id=?",
+                (category, kind, status,
+                 KINDS[kind][0] if kind != item["kind"] else item["importance"],
+                 int(changed), now, memory_id),
+            )
+            if changed:
+                self.connection.execute("DELETE FROM memory_views WHERE memory_id=?", (memory_id,))
+
+    def merge(self, user_id, character_id, target_id, source_id):
+        """Join source links of two reviewed duplicates and retire the second item."""
+        if target_id == source_id:
+            raise MiraError("invalid_memory_merge")
+        now = datetime.now(timezone.utc).isoformat()
+        with self.connection:
+            target = self.get_item(user_id, character_id, target_id)
+            source = self.get_item(user_id, character_id, source_id)
+            allowed = {"active", "open", "resolved"}
+            if target is None or source is None or target["status"] not in allowed or source["status"] not in allowed:
+                raise MiraError("memory_not_found")
+            if target["kind"] != source["kind"] or target["claim_mode"] != source["claim_mode"]:
+                raise MiraError("invalid_memory_merge")
+            self.connection.execute(
+                "INSERT OR IGNORE INTO memory_sources (memory_id,turn_id,evidence) "
+                "SELECT ?,s.turn_id,s.evidence FROM memory_sources s "
+                "WHERE s.memory_id=? AND NOT EXISTS "
+                "(SELECT 1 FROM memory_suppressions x WHERE x.turn_id=s.turn_id)",
+                (target_id, source_id),
+            )
+            self.connection.execute(
+                "UPDATE memory_items SET version=version+1,updated_at=? WHERE id=?",
+                (now, target_id),
+            )
+            self.connection.execute(
+                "UPDATE memory_items SET status='superseded',version=version+1,updated_at=? WHERE id=?",
+                (now, source_id),
+            )
+            self.connection.execute("DELETE FROM memory_views WHERE memory_id IN (?,?)",
+                                    (target_id, source_id))
+            self.connection.execute(
+                "UPDATE memory_edges SET active=0 WHERE from_id=? OR to_id=?",
+                (source_id, source_id),
+            )
+
     def source_texts(self, user_id, character_id, memory_id):
         return self.connection.execute(
             "SELECT m.text,m.occurred_at FROM memory_sources s "
@@ -437,7 +516,7 @@ class MemoryRepository:
         now = datetime.now(timezone.utc).isoformat()
         with self.connection:
             old = self.get_item(user_id, character_id, memory_id)
-            if old is None or old["status"] not in {"active", "open", "resolved", "disputed"}:
+            if old is None or old["status"] not in {"active", "open", "resolved", "disputed", "candidate"}:
                 raise MiraError("memory_not_found")
             new_id = str(uuid4())
             self.connection.execute(
@@ -453,15 +532,15 @@ class MemoryRepository:
                 "INSERT INTO memory_items "
                 "(id,user_id,character_id,kind,claim_mode,status,subject,content,"
                 "fact_key,topics,sensitivity,importance,occurred_at,"
-                "last_user_evidence_at,created_at,updated_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "last_user_evidence_at,created_at,updated_at,category) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (new_id, user_id, character_id, old["kind"],
                  "planned" if old["kind"] == "plan" else "asserted",
                  "open" if old["kind"] == "plan" and
                  old["status"] in {"open", "disputed"} else "active",
                  old["subject"], content, old["fact_key"], old["topics"],
                  old["sensitivity"], old["importance"], turn["occurred_at"],
-                 turn["occurred_at"], now, now),
+                 turn["occurred_at"], now, now, old["category"]),
             )
             self.connection.execute(
                 "INSERT INTO memory_sources VALUES (?,?,?)",
@@ -481,8 +560,12 @@ class MemoryRepository:
             )
             self.connection.execute(
                 "INSERT OR IGNORE INTO memory_suppressions (turn_id,created_at) "
-                "SELECT turn_id,? FROM memory_sources WHERE memory_id=?",
-                (now, memory_id),
+                "SELECT s.turn_id,? FROM memory_sources s WHERE s.memory_id=? "
+                "AND NOT EXISTS (SELECT 1 FROM memory_sources other "
+                "JOIN memory_items m ON m.id=other.memory_id "
+                "WHERE other.turn_id=s.turn_id AND other.memory_id<>? "
+                "AND m.status IN ('active','open','resolved','candidate','disputed'))",
+                (now, memory_id, memory_id),
             )
             self.connection.execute(
                 "INSERT OR IGNORE INTO memory_suppressions (turn_id,created_at) "
@@ -504,6 +587,33 @@ class MemoryRepository:
                 (turn["turn_id"], now),
             )
             return new_id
+
+    def correct_from_admin(self, user_id, character_id, memory_id, content):
+        """Record a dashboard correction as provenance without a chat reply."""
+        if not content or len(content) > 300:
+            raise MiraError("invalid_memory_correction")
+        old = self.get_item(user_id, character_id, memory_id)
+        if old is None or old["status"] not in {"active", "open", "resolved", "disputed", "candidate"}:
+            raise MiraError("memory_not_found")
+        now = datetime.now(timezone.utc).isoformat()
+        turn_id = str(uuid4())
+        with self.connection:
+            self.connection.execute(
+                "INSERT INTO turns (id,user_id,character_id,source,source_message_id,"
+                "status,created_at,updated_at) VALUES (?,?,?,?,?,'completed',?,?)",
+                (turn_id, user_id, character_id, "admin", turn_id, now, now),
+            )
+            self.connection.execute(
+                "INSERT INTO messages VALUES (?,?,?,?,?,?)",
+                (str(uuid4()), turn_id, "user", content, now, now),
+            )
+            self.connection.execute(
+                "INSERT INTO memory_jobs (turn_id,status,queued_at) "
+                "VALUES (?,'completed',?)",
+                (turn_id, now),
+            )
+            return self.correct(user_id, character_id, memory_id,
+                                {"turn_id": turn_id, "occurred_at": now}, content)
 
     def log_recall(self, user_id, character_id, query_turn_id, decisions):
         now = datetime.now(timezone.utc).isoformat()

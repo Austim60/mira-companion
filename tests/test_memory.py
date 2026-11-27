@@ -7,7 +7,7 @@ from pathlib import Path
 from mira.config import Settings
 from mira.conversation import ConversationService
 from mira.memory import MemoryService
-from mira.models import MessageInput
+from mira.models import MessageInput, MiraError
 from mira.storage import ConversationRepository
 
 
@@ -208,6 +208,65 @@ class MemoryTests(unittest.TestCase):
         self.add_turn("2", "蓝色呢")
         self.assertIn("我喜欢蓝色", self.provider.calls[-1][0][0]["content"])
 
+    def test_admin_organization_and_merge_preserve_evidence(self):
+        first = self.add_turn("organize-1", "我喜欢蓝色")
+        second = self.add_turn("organize-2", "蓝色是我喜欢的颜色")
+        first_id = self.memory.remember(
+            self.repository.get_turn(first.turn_id), "我喜欢蓝色", "interest"
+        )
+        second_id = self.memory.remember(
+            self.repository.get_turn(second.turn_id), "蓝色是我喜欢的颜色", "interest"
+        )
+        store = self.memory.repository
+        store.organize("user", "mira", first_id, "个人喜好", "user_fact")
+        store.organize("user", "mira", second_id, "个人喜好", "user_fact")
+        self.assertEqual(store.get_item("user", "mira", first_id)["category"], "个人喜好")
+        self.assertEqual(store.get_item("user", "mira", first_id)["importance"], 0.55)
+        store.merge("user", "mira", first_id, second_id)
+        self.assertEqual(store.get_item("user", "mira", second_id)["status"], "superseded")
+        self.assertEqual(len(store.source_texts("user", "mira", first_id)), 2)
+        self.assertEqual(len(store.list_for_admin("user", "mira")), 1)
+        self.assertEqual(len(self.memory.recall("user", "mira", "我喜欢蓝色")), 1)
+
+    def test_candidate_requires_review_before_confirmation(self):
+        turn = self.add_turn("candidate-1", "有人说我喜欢蓝色")
+        row = self.repository.connection.execute(
+            "SELECT t.id AS turn_id,t.user_id,t.character_id,m.text,m.occurred_at "
+            "FROM turns t JOIN messages m ON m.turn_id=t.id AND m.role='user' "
+            "WHERE t.id=?", (turn.turn_id,),
+        ).fetchone()
+        self.memory.repository.save_batch([row], [{
+            "turn_id": turn.turn_id, "kind": "interest", "claim_mode": "quote",
+            "status": "candidate", "subject": "user", "content": "我喜欢蓝色",
+            "evidence": "我喜欢蓝色", "fact_key": None, "topics": ["蓝色"],
+            "sensitivity": "ordinary", "importance": 0.35,
+        }])
+        item = self.memory.repository.list_for_admin("user", "mira")[0]
+        self.assertEqual(item["status"], "candidate")
+        self.assertEqual(self.memory.recall("user", "mira", "蓝色"), [])
+        with self.assertRaisesRegex(MiraError, "invalid_memory_confirmation"):
+            self.memory.repository.organize("user", "mira", item["id"], "待核对", "interest", True)
+        corrected_id = self.memory.repository.correct_from_admin(
+            "user", "mira", item["id"], "我喜欢蓝色"
+        )
+        self.assertEqual(self.memory.repository.get_item(
+            "user", "mira", corrected_id
+        )["status"], "active")
+
+    def test_editing_one_memory_keeps_other_memory_from_same_turn(self):
+        turn = self.add_turn("shared-source", "我喜欢蓝色，也喜欢散步")
+        source = self.repository.get_turn(turn.turn_id)
+        first_id = self.memory.remember(source, "我喜欢蓝色", "interest")
+        second_id = self.memory.remember(source, "也喜欢散步", "interest")
+        self.memory.repository.correct_from_admin(
+            "user", "mira", first_id, "我喜欢绿色"
+        )
+        remaining = self.memory.repository.get_item("user", "mira", second_id)
+        self.assertEqual(remaining["status"], "active")
+        self.assertEqual(len(self.memory.repository.source_texts(
+            "user", "mira", second_id
+        )), 1)
+
     def test_correction_replaces_old_view_and_source(self):
         old_turn = self.add_turn("1", "我喜欢蓝色")
         old_id = self.memory.remember(
@@ -225,6 +284,29 @@ class MemoryTests(unittest.TestCase):
         self.assertEqual(self.repository.user_messages_before(
             self.repository.get_turn(correction.turn_id), 20
         )[0], 0)
+
+    def test_admin_correction_preserves_source_without_entering_chat_history(self):
+        original = self.add_turn("admin-source", "我喜欢蓝色")
+        old_id = self.memory.remember(
+            self.repository.get_turn(original.turn_id), "我喜欢蓝色", "interest"
+        )
+        new_id = self.memory.repository.correct_from_admin(
+            "user", "mira", old_id, "我喜欢绿色"
+        )
+        self.assertEqual(self.memory.source("user", "mira", new_id)[0]["text"],
+                         "我喜欢绿色")
+        admin_turn = self.repository.connection.execute(
+            "SELECT id FROM turns WHERE source='admin'"
+        ).fetchone()
+        self.assertIsNotNone(admin_turn)
+        self.assertEqual(self.repository.connection.execute(
+            "SELECT status FROM memory_jobs WHERE turn_id=?", (admin_turn["id"],)
+        ).fetchone()["status"], "completed")
+        next_turn = self.add_turn("after-admin", "你还记得吗")
+        history = self.repository.user_messages_before(
+            self.repository.get_turn(next_turn.turn_id), 20
+        )[1]
+        self.assertTrue(all(row["text"] != "我喜欢绿色" for row in history))
 
     def test_old_daily_fragment_fades_but_important_event_remains_recallable(self):
         self.local_now = datetime.now().astimezone()

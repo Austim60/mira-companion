@@ -16,8 +16,8 @@ class MemoryProvider:
         self.responses = []
         self.calls = []
 
-    def generate(self, messages, tools=None):
-        self.calls.append((messages, tools))
+    def generate(self, messages, tools=None, max_output_tokens=None):
+        self.calls.append((messages, tools, max_output_tokens))
         if tools is not None:
             return {"role": "assistant", "content": "收到"}, 1, 1
         return {"role": "assistant", "content": json.dumps(
@@ -92,6 +92,20 @@ class MemoryTests(unittest.TestCase):
         self.assertEqual(self.memory.recall("user", "mira", "面试怎么样了")[0]["id"],
                          item["id"])
         self.assertEqual(self.memory.recall("other", "mira", "面试怎么样了"), [])
+
+    def test_extract_five_turns_uses_larger_output_limit(self):
+        turns = [self.add_turn(str(index), f"今天聊了话题{index}")
+                 for index in range(5)]
+        self.provider.responses.append({"items": [
+            {"turn_id": turn.turn_id, "kind": "daily_fragment",
+             "claim_mode": "asserted", "subject": "user",
+             "content": f"今天聊了话题{index}", "evidence": f"今天聊了话题{index}",
+             "fact_key": None, "topics": [], "sensitivity": "ordinary"}
+            for index, turn in enumerate(turns)
+        ], "handoff": ""})
+        self.assertEqual(self.memory.run_due(), 5)
+        self.assertEqual(self.provider.calls[-1][2], 2048)
+        self.assertEqual(len(self.memory.list_memories("user", "mira")), 5)
 
     def test_invalid_evidence_retries_without_memory(self):
         turn = self.add_turn("1", "普通聊天")

@@ -44,7 +44,10 @@ class MemoryService:
     def _model_reply(self, messages, stage, user_id, character_id, source_id):
         started = perf_counter()
         try:
-            answer, input_tokens, output_tokens = self.provider.generate(messages)
+            output_limit = max(2048, self.settings.max_output_tokens) if stage == "extract" else None
+            answer, input_tokens, output_tokens = self.provider.generate(
+                messages, max_output_tokens=output_limit
+            )
         except MiraError as exc:
             self.repository.log_model_call(
                 stage, user_id, character_id, source_id, "failed", None, None,

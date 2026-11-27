@@ -11,16 +11,17 @@ class OpenAICompatibleProvider:
     def __init__(self, settings):
         self.settings = settings
 
-    def generate(self, messages, tools=None):
+    def generate(self, messages, tools=None, max_output_tokens=None):
         s = self.settings
         body = {'model': s.model, 'messages': messages, 'temperature': s.temperature,
-                'max_tokens': s.max_output_tokens}
+                'max_tokens': max_output_tokens if max_output_tokens is not None
+                else s.max_output_tokens}
         if tools:
             body['tools'] = tools
             body['tool_choice'] = 'auto'
-            host = urllib.parse.urlparse(s.base_url).hostname or ''
-            if host == 'api.deepseek.com' and s.model == 'deepseek-flash':
-                body['thinking'] = {'type': 'disabled'}
+        host = urllib.parse.urlparse(s.base_url).hostname or ''
+        if host == 'api.deepseek.com' and s.model == 'deepseek-flash':
+            body['thinking'] = {'type': 'disabled'}
         payload = json.dumps(body, ensure_ascii=False).encode('utf-8')
         request = urllib.request.Request(s.base_url.rstrip('/') + '/chat/completions', data=payload,
             headers={'Authorization': 'Bearer ' + s.api_key, 'Content-Type': 'application/json'}, method='POST')

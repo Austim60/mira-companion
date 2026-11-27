@@ -47,6 +47,19 @@ class ProviderTests(unittest.TestCase):
             with self.assertRaisesRegex(MiraError, "empty_response"):
                 self.provider.generate([{"role": "user", "content": "你好"}], [])
 
+    def test_output_limit_can_be_overridden_for_memory_extraction(self):
+        response = {"choices": [{"finish_reason": "stop", "message": {
+            "role": "assistant", "content": "{}"
+        }}]}
+        with patch("urllib.request.urlopen", return_value=io.BytesIO(
+            json.dumps(response).encode("utf-8")
+        )) as urlopen:
+            self.provider.generate([{"role": "user", "content": "记忆"}],
+                                   max_output_tokens=2048)
+        self.assertEqual(json.loads(urlopen.call_args.args[0].data)["max_tokens"], 2048)
+        self.assertEqual(json.loads(urlopen.call_args.args[0].data)["thinking"],
+                         {"type": "disabled"})
+
 
 if __name__ == "__main__":
     unittest.main()

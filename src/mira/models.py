@@ -19,6 +19,7 @@ class ConversationResult:
     text: Optional[str] = None
     error_code: Optional[str] = None
     retryable: bool = False
+    quote_current_message: bool = False
 
 
 class MiraError(Exception):

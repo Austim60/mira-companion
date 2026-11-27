@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mira 管理端</title>
+  <link rel="stylesheet" href="/assets/styles.css">
+  <script src="/assets/app.js" defer></script>
+</head>
+<body>
+  <div id="auth" class="auth-screen hidden">
+    <div class="auth-card">
+      <div class="brand-mark">M</div>
+      <h1 id="auth-title">欢迎使用 Mira</h1>
+      <p id="auth-description">管理你的机器人、角色与记忆。</p>
+      <form id="auth-form">
+        <label for="auth-password">管理密码</label>
+        <input id="auth-password" type="password" autocomplete="current-password" required>
+        <button class="primary" type="submit" id="auth-submit">进入管理端</button>
+      </form>
+      <p class="form-help">仅在本机开放管理端，密码长短由你决定。</p>
+      <p id="auth-error" class="error-text" role="alert"></p>
+    </div>
+  </div>
+
+  <div id="shell" class="shell hidden">
+    <aside class="sidebar">
+      <div class="brand"><div class="brand-mark">M</div><div><strong>Mira</strong><span>管理端</span></div></div>
+      <nav aria-label="主导航">
+        <button class="nav-item active" data-page="overview"><span class="nav-icon">◫</span> 总览</button>
+        <button class="nav-item" data-page="bot"><span class="nav-icon">◎</span> 机器人接入</button>
+        <button class="nav-item" data-page="character"><span class="nav-icon">✦</span> 角色与模型</button>
+        <button class="nav-item" data-page="memory"><span class="nav-icon">▤</span> 记忆</button>
+        <button class="nav-item" data-page="logs"><span class="nav-icon">≡</span> 日志</button>
+      </nav>
+      <div class="sidebar-bottom"><span>单机器人 · 单角色</span></div>
+    </aside>
+
+    <div class="workspace">
+      <header class="topbar">
+        <div><span class="breadcrumb">工作台 / </span><strong id="top-title">总览</strong></div>
+        <div class="top-actions"><span id="top-status" class="status-pill">正在读取</span><button id="refresh" class="icon-button" type="button" title="刷新">↻</button><button id="logout" class="top-logout" type="button">退出</button></div>
+      </header>
+      <main>
+        <section id="page-overview" class="page active">
+          <div class="page-heading"><div><p class="eyebrow">运行概况</p><h1>总览</h1><p>查看 Mira 的连接与记忆处理状态。</p></div><button id="run-check" class="secondary" type="button">立即检查后台任务</button></div>
+          <div class="stats">
+            <article class="stat-card"><span>QQ 连接</span><strong id="stat-connection">—</strong><small id="stat-app-id">尚未配置</small></article>
+            <article class="stat-card"><span>已完成对话</span><strong id="stat-turns">0</strong><small>当前角色</small></article>
+            <article class="stat-card"><span>有效记忆</span><strong id="stat-memories">0</strong><small>可召回的记录</small></article>
+            <article class="stat-card"><span>待整理</span><strong id="stat-pending">0</strong><small id="stat-failed">失败 0 条</small></article>
+          </div>
+          <div class="grid-two">
+            <article class="panel"><div class="panel-heading"><h2>当前机器人</h2><button class="text-button" data-go="bot" type="button">管理接入 →</button></div><div id="overview-bot" class="detail-list"></div></article>
+            <article class="panel"><div class="panel-heading"><h2>当前角色</h2><button class="text-button" data-go="character" type="button">编辑角色 →</button></div><div id="overview-character" class="detail-list"></div></article>
+          </div>
+        </section>
+
+        <section id="page-bot" class="page">
+          <div class="page-heading"><div><p class="eyebrow">QQ 官方机器人</p><h1>机器人接入</h1><p>连接一个机器人，并固定绑定当前角色的私聊。</p></div></div>
+          <div class="notice">切换到 Mira 直连前，请先停止 AstrBot 中同一机器人的连接，避免收到两份回复。</div>
+          <div class="grid-two">
+            <article class="panel"><div class="panel-heading"><h2>连接状态</h2><span id="bot-status" class="status-pill">未连接</span></div><div id="bot-details" class="detail-list"></div><p id="bot-error" class="error-text"></p><div class="button-row"><button id="bot-toggle" class="primary" type="button">启动连接</button><button id="bot-test" class="secondary" type="button">发送测试消息</button></div></article>
+            <article class="panel"><div class="panel-heading"><h2>扫码接入</h2></div><p class="panel-description">使用手机 QQ 扫码，凭据会自动保存到本机，页面不会显示密钥。</p><button id="onboard-start" class="secondary" type="button">开始扫码接入</button><div id="onboard-progress" class="onboard-progress hidden"><img id="onboard-qr" alt="QQ 机器人接入二维码"><p id="onboard-message">等待扫码…</p></div></article>
+          </div>
+          <div class="grid-two bottom-grid">
+            <article class="panel"><div class="panel-heading"><h2>手动接入现有机器人</h2></div><form id="bot-form" class="form-grid"><label>AppID<input name="app_id" autocomplete="off" required></label><label>AppSecret<input name="secret" type="password" autocomplete="new-password" placeholder="已保存时可留空"></label><label>允许聊天的 QQ 用户 ID<input name="allowed_user_id" autocomplete="off" placeholder="可在收到私聊后绑定"></label><div class="form-actions"><button class="primary" type="submit">保存接入信息</button></div></form></article>
+            <article class="panel"><div class="panel-heading"><h2>私聊绑定</h2></div><p class="panel-description">只处理绑定账号的私聊。未绑定时，Mira 会显示最近联系机器人的账号供你确认。</p><div id="pending-user" class="pending-user">暂无待绑定账号</div><button id="bind-pending" class="secondary" type="button" disabled>绑定此账号</button></article>
+          </div>
+        </section>
+
+        <section id="page-character" class="page">
+          <div class="page-heading"><div><p class="eyebrow">对话设定</p><h1>角色与模型</h1><p>修改后从后续对话生效，角色 ID 保持稳定。</p></div></div>
+          <div class="grid-two align-start">
+            <article class="panel"><div class="panel-heading"><h2>角色设定</h2></div><form id="character-form" class="form-grid"><label>角色 ID<input name="character_id" required></label><label>显示名称<input name="display_name" required></label><label>性格<textarea name="personality" rows="3" required></textarea></label><label>说话方式<textarea name="speaking_style" rows="3" required></textarea></label><label>角色背景<textarea name="background" rows="4" required></textarea></label><label>互动边界<textarea name="boundaries" rows="4" required></textarea></label><div class="form-actions"><button class="primary" type="submit">保存角色</button></div></form></article>
+            <article class="panel"><div class="panel-heading"><h2>模型服务</h2></div><form id="model-form" class="form-grid"><label>接口地址<input name="base_url" type="url" placeholder="https://…"></label><label>模型名称<input name="model"></label><label>API Key<input name="api_key" type="password" autocomplete="new-password" placeholder="已保存时可留空"></label><div class="form-row"><label>温度<input name="temperature" type="number" min="0" max="2" step="0.1"></label><label>最大输出 Token<input name="max_output_tokens" type="number" min="1" max="8192"></label></div><p class="form-help">密钥仅保存在本机配置文件中，不会在页面回显。</p><div class="form-actions"><button class="primary" type="submit">保存模型</button></div></form></article>
+          </div>
+        </section>
+
+        <section id="page-memory" class="page">
+          <div class="page-heading"><div><h1>记忆</h1><p>查看原始对话，核对和更正长期记忆。</p></div><button id="memory-refresh" class="secondary" type="button">刷新</button></div>
+          <details id="history-panel" class="panel history-panel">
+            <summary>原始对话记录</summary>
+            <div id="history-list" aria-live="polite"></div>
+            <button id="history-more" class="secondary hidden" type="button">加载更早的对话</button>
+          </details>
+          <div class="memory-layout"><div class="panel memory-list-panel"><div class="panel-heading"><h2>记忆列表</h2><span id="memory-count" class="muted">0 条</span></div><div class="memory-filters"><input id="memory-search" type="search" placeholder="搜索记忆" aria-label="搜索记忆"><select id="memory-status-filter" aria-label="筛选记忆状态"><option value="">全部状态</option><option value="active">有效</option><option value="candidate">待核对</option><option value="disputed">有争议</option><option value="open">进行中</option><option value="resolved">已结束</option></select></div><div id="memory-list" class="memory-list"><div class="empty">暂无记忆</div></div></div><div class="panel memory-detail-panel"><div class="panel-heading"><h2>记忆详情</h2></div><div id="memory-empty" class="empty">从左侧选择一条记忆</div><div id="memory-detail" class="hidden"><div id="memory-meta" class="memory-meta"></div><p id="memory-content" class="memory-content"></p><h3>来源原话</h3><div id="memory-sources" class="source-list"></div><form id="memory-organize-form" class="form-grid"><label>类别<input id="memory-category" maxlength="40" list="memory-category-options" placeholder="选择或输入类别"></label><datalist id="memory-category-options"></datalist><label>记忆类型<select id="memory-kind"><option value="daily_fragment">日常片段</option><option value="interest">兴趣</option><option value="user_fact">用户事实</option><option value="episode">普通事件</option><option value="important_event">重要事件</option><option value="shared_experience">共同经历</option><option value="plan">计划</option></select></label><label id="memory-confirm-label" class="memory-check hidden"><input id="memory-confirm" type="checkbox"> 已核对来源，确认这条记忆</label><div class="button-row"><button class="primary" type="submit">保存分类与状态</button></div></form><form id="memory-correct-form" class="form-grid memory-action"><label>编辑记忆内容<textarea id="memory-correction" rows="3" maxlength="300" required></textarea></label><div class="button-row"><button class="secondary" type="submit">保存内容更正</button></div></form><div class="memory-action form-grid"><label>合并重复记忆<select id="memory-merge-source"><option value="">选择要并入的记忆</option></select></label><div class="button-row"><button id="memory-merge" class="secondary" type="button">合并并保留来源</button><button id="memory-forget" class="danger" type="button">停止使用这条记忆</button></div></div></div></div></div>
+        </section>
+
+        <section id="page-logs" class="page">
+          <div class="page-heading"><div><p class="eyebrow">运行记录</p><h1>日志</h1><p>实时查看服务运行过程，也可按事件核对结果；这里不显示私聊原文或密钥。</p></div></div>
+          <div class="log-tabs" role="tablist" aria-label="日志视图"><button id="runtime-tab" class="log-tab active" type="button" role="tab" aria-selected="true">运行日志</button><button id="events-tab" class="log-tab" type="button" role="tab" aria-selected="false">最近事件</button></div>
+          <div id="runtime-panel" class="panel" role="tabpanel"><div class="panel-heading"><h2>运行日志</h2><span id="runtime-file" class="muted"></span></div><div class="runtime-controls"><select id="runtime-level" aria-label="筛选日志级别"><option value="">全部级别</option><option value="INFO">INFO</option><option value="WARN">WARN</option><option value="ERROR">ERROR</option></select><input id="runtime-search" type="search" placeholder="搜索日志内容" aria-label="搜索日志内容"><label><input id="runtime-auto" type="checkbox" checked> 自动刷新</label><button id="runtime-refresh" class="secondary" type="button">刷新</button></div><div id="runtime-console" class="runtime-console" role="log" aria-live="off"><div class="runtime-empty">暂无运行日志</div></div><p class="form-help">显示最近 500 行；日志文件会自动轮转。</p></div>
+          <div id="events-panel" class="panel hidden" role="tabpanel"><div class="panel-heading"><h2>最近事件</h2><div class="button-row"><span class="muted">最多 100 条</span><button id="logs-refresh" class="secondary" type="button">刷新事件</button></div></div><div id="log-list" class="log-list"><div class="empty">暂无运行记录</div></div></div>
+        </section>
+      </main>
+    </div>
+  </div>
+  <div id="toast" class="toast hidden" role="status"></div>
+</body>
+</html>

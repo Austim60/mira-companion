@@ -20,7 +20,7 @@ class Settings:
     temperature: float = 0.8
 
 
-def load_settings(root=None):
+def load_settings(root=None, require_model=True):
     # A local .env supplies defaults; the process environment takes precedence.
     values = {}
     root = Path(root) if root is not None else Path.cwd()
@@ -33,6 +33,13 @@ def load_settings(root=None):
                     raise MiraError('invalid_env_file')
                 key, value = line.split('=', 1)
                 values[key.strip()] = value.strip().strip('"\'')
+    server_path = root / 'data' / 'server_config.json'
+    if server_path.exists():
+        try:
+            server_data = json.loads(server_path.read_text(encoding='utf-8'))
+            values.update(server_data.get('model', {}))
+        except (OSError, ValueError, AttributeError, TypeError) as exc:
+            raise MiraError('invalid_server_config') from exc
     values.update(os.environ)
     def get(name, default=''):
         return values.get('MIRA_' + name, default)
@@ -47,8 +54,8 @@ def load_settings(root=None):
             float(get('TEMPERATURE', '0.8')))
     except ValueError as exc:
         raise MiraError('invalid_settings') from exc
-    if (not all((result.base_url, result.api_key, result.model)) or
-        not result.base_url.startswith(('https://', 'http://')) or
+    if ((require_model and not all((result.base_url, result.api_key, result.model))) or
+        (result.base_url and not result.base_url.startswith(('https://', 'http://'))) or
         result.timeout <= 0 or result.max_output_tokens <= 0 or result.history_turns < 0 or
         result.char_budget <= 0 or not 0 <= result.temperature <= 2):
         raise MiraError('invalid_settings')

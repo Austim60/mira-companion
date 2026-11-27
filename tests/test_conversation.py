@@ -213,6 +213,32 @@ class ConversationTests(unittest.TestCase):
         self.assertEqual(self.service.handle_message(first), result)
         self.assertEqual(len(self.provider.calls), 2)
 
+    def test_qq_quote_is_optional_model_decision(self):
+        normal = self.service.handle_message(replace(
+            self.message("1", "你好"), source="qq:123456"
+        ))
+        self.assertFalse(normal.quote_current_message)
+        self.assertIn("quote_current_message", [
+            tool["function"]["name"] for tool in self.provider.tools[0]
+        ])
+        quote_call = {"id": "quote-1", "type": "function", "function": {
+            "name": "quote_current_message", "arguments": "{}"}}
+        self.provider.responses = [
+            ({"role": "assistant", "content": None, "tool_calls": [quote_call]}, 12, 3),
+            ({"role": "assistant", "content": "我指的是你刚才这句话。"}, 20, 5),
+        ]
+        quoted = self.service.handle_message(replace(
+            self.message("2", "哪句话？"), source="qq:123456"
+        ))
+        self.assertTrue(quoted.quote_current_message)
+        self.assertEqual(quoted.text, "我指的是你刚才这句话。")
+        self.assertIn('"quote_current_message": true',
+                      self.provider.calls[-1][-1]["content"])
+        self.service.handle_message(self.message("3", "继续"))
+        self.assertNotIn("quote_current_message", [
+            tool["function"]["name"] for tool in self.provider.tools[-1]
+        ])
+
     def test_follow_up_keeps_source_and_can_be_closed(self):
         self.service.prepare()
         self.repository.set_proactive_enabled("user", "mira", True)

@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 from .config import load_character
 from .context import build_context, local_time
-from .model_tools import CHAT_TOOLS
+from .model_tools import CHAT_TOOLS, QQ_QUOTE_TOOL
 from .memory import MemoryService
 from .models import ConversationResult, MiraError
 
@@ -139,6 +139,10 @@ class ConversationService:
             if not isinstance(arguments, dict):
                 raise MiraError("invalid_tool_arguments")
             name = call["function"]["name"]
+            if name == "quote_current_message":
+                if arguments or not turn["source"].startswith("qq:"):
+                    raise MiraError("invalid_tool_arguments")
+                return {"quote_current_message": True}
             if name == "list_memories":
                 if set(arguments) - {"query"} or not isinstance(arguments.get("query", ""), str):
                     raise MiraError("invalid_tool_arguments")
@@ -314,10 +318,13 @@ class ConversationService:
         except MiraError as exc:
             self.repository.mark_failed(turn_id, exc.code)
             return self._result(self.repository.get_turn(turn_id))
+        qq_reply = turn["source"].startswith("qq:")
+        tools = CHAT_TOOLS + [QQ_QUOTE_TOOL] if qq_reply else CHAT_TOOLS
+        quote_current_message = False
         for _ in range(4):
             attempt = self.repository.begin_attempt(turn_id, "openai_compatible", self.settings.model)
             try:
-                assistant, input_tokens, output_tokens = self.provider.generate(messages, CHAT_TOOLS)
+                assistant, input_tokens, output_tokens = self.provider.generate(messages, tools)
             except MiraError as exc:
                 self.repository.finish(turn_id, "failed", "openai_compatible",
                                        self.settings.model, attempt, error_code=exc.code)
@@ -329,6 +336,7 @@ class ConversationService:
                 try:
                     for call in calls:
                         result = self._execute_tool(turn, call)
+                        quote_current_message |= result.get("quote_current_message", False)
                         messages.append({"role": "tool", "tool_call_id": call["id"],
                                          "content": json.dumps(result, ensure_ascii=False)})
                 except sqlite3.Error:
@@ -343,6 +351,7 @@ class ConversationService:
             self.repository.finish(turn_id, "completed", "openai_compatible",
                                    self.settings.model, attempt, text=text,
                                    input_tokens=input_tokens, output_tokens=output_tokens)
-            return ConversationResult(turn_id, "completed", text)
+            return ConversationResult(turn_id, "completed", text,
+                                      quote_current_message=quote_current_message)
         self.repository.mark_failed(turn_id, "tool_round_limit")
         return self._result(self.repository.get_turn(turn_id))

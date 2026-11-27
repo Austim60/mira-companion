@@ -7,9 +7,19 @@ name = "mira-companion"
 version = "0.1.0"
 requires-python = ">=3.10"
 description = "Local text companion core"
+dependencies = [
+    "fastapi>=0.115,<1",
+    "uvicorn>=0.30,<1",
+    "httpx>=0.27,<1",
+    "qqbot-agent-sdk[qrcode]>=1.2.2,<2",
+]
 
 [project.scripts]
 mira = "mira.cli:main"
+mira-server = "mira.server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+mira = ["web/*"]

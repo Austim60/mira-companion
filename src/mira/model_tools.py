@@ -1,6 +1,16 @@
 """Tool descriptions offered to the conversation model."""
 
 
+QQ_QUOTE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "quote_current_message",
+        "description": "决定这次 QQ 回复是否显示对当前用户消息的引用框。通常直接回复，不要调用；只有引用能让回复所指更清楚，或用户要求引用当前消息时才调用。调用后继续生成正常回复正文。",
+        "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+}
+
+
 CHAT_TOOLS = [
     {
         "type": "function",
